@@ -7,6 +7,7 @@ from pprint import pprint
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 import httpx
+import phonenumbers
 
 
 # -----------------------------
@@ -133,11 +134,14 @@ class SiteEvaluator:
         signals["non_ksa"] = 1.0 if non_ksa else 0.0
 
         # 3) Industry signals
-        kitchen_signal = self._bucket_signal(norm_text, self.keywords["kitchen"])
-        interior_signal = self._bucket_signal(norm_text, self.keywords["interior"])
-        fitout_signal = self._bucket_signal(norm_text, self.keywords["fitout"])
-        portfolio_signal = self._bucket_signal(norm_text, self.keywords["portfolio"])
-        business_signal = self._bucket_signal(norm_text, self.keywords["business_markers"])
+        kitchen_signal = self._bucket_signal(norm_text, self.keywords["kitchen"], min_hits=1)
+        interior_signal = self._bucket_signal(norm_text, self.keywords["interior"], min_hits=1)
+
+        # Require min 2 hits
+        fitout_signal = self._bucket_signal(norm_text, self.keywords["fitout"], min_hits=2)
+        portfolio_signal = self._bucket_signal(norm_text, self.keywords["portfolio"], min_hits=2)
+
+        business_signal = self._bucket_signal(norm_text, self.keywords["business_markers"], min_hits=1)
 
         signals["kitchen_signal"] = kitchen_signal
         signals["interior_signal"] = interior_signal
@@ -145,7 +149,7 @@ class SiteEvaluator:
         signals["portfolio_signal"] = portfolio_signal
         signals["business_signal"] = business_signal
 
-        negative_signal = self._bucket_signal(norm_text, self.negative_keywords)
+        negative_signal = self._bucket_signal(norm_text, self.negative_keywords, min_hits=2)
         signals["negative_signal"] = negative_signal
 
         # 4) Compute score
@@ -161,7 +165,8 @@ class SiteEvaluator:
         score += int(portfolio_signal * self.weights["portfolio_signal"])
         score += int(business_signal * self.weights["business_signal"])
 
-        if negative_signal > 0:
+        # Apply negative penalty only if the site does NOT look like our target industry.
+        if negative_signal > 0 and (kitchen_signal == 0 and interior_signal == 0 and fitout_signal == 0):
             score += int(self.weights["negative_signal"])
 
         if non_ksa:
@@ -248,57 +253,82 @@ class SiteEvaluator:
 
     def _categorize(self, norm_text: str, contacts: Dict[str, List[str]]) -> Tuple[str, str]:
         """
-        Very lightweight categorization using the same signals.
-        Returns (category, lead_type).
+        Lightweight categorization + lead type inference.
+
+        Key rules:
+          - 'individual' category is only allowed for true B2C-like pages
+            (individual markers strong AND no business markers AND no corporate contacts).
+          - Prefer architect over fit-out on ties (common for engineering offices).
+          - Keep category and lead_type consistent (no 'individual' with B2B).
         """
-        # Category scores
-        scores = {
-            "showroom": self._bucket_signal(norm_text, self.keywords["showroom"]),
-            "fit-out": self._bucket_signal(norm_text, self.keywords["fitout"]),
-            "designer": self._bucket_signal(norm_text, self.keywords["designer"]),
-            "architect": self._bucket_signal(norm_text, self.keywords["architect"]),
-            "developer": self._bucket_signal(norm_text, self.keywords["developer"]),
-            "individual": self._bucket_signal(norm_text, self.keywords["individual_markers"]),
-        }
 
-        # Pick top category if any signal
-        top_cat, top_val = max(scores.items(), key=lambda kv: kv[1])
-        category = top_cat if top_val > 0 else "unknown"
+        # --- Helper: call bucket signal with optional min_hits (works with both old/new implementations)
+        def sig(bucket_name: str, min_hits: int = 2) -> float:
+            try:
+                return self._bucket_signal(norm_text, self.keywords[bucket_name], min_hits=min_hits)  # type: ignore
+            except TypeError:
+                # Fallback if your _bucket_signal doesn't accept min_hits yet
+                return self._bucket_signal(norm_text, self.keywords[bucket_name])  # type: ignore
 
-        # Lead type heuristic:
-        # - If "individual" markers dominate and business markers are weak => B2C
-        # - Else default to B2B for company sites
-        business_val = self._bucket_signal(norm_text, self.keywords["business_markers"])
-        individual_val = scores["individual"]
+        def sig_terms(terms: List[str], min_hits: int = 2) -> float:
+            try:
+                return self._bucket_signal(norm_text, terms, min_hits=min_hits)  # type: ignore
+            except TypeError:
+                return self._bucket_signal(norm_text, terms)  # type: ignore
 
-        if individual_val > 0 and business_val == 0:
+        # --- Base signals for lead type decision
+        business_val = sig_terms(self.keywords["business_markers"], min_hits=1)
+
+        # Make "individual" harder to trigger: require 2+ hits (or strict bucket)
+        individual_val = sig_terms(self.keywords["individual_markers"], min_hits=2)
+
+        # Corporate contact hint: email/phone present usually means company-like (not always, but good heuristic)
+        has_contacts = bool(contacts.get("emails") or contacts.get("phones"))
+
+        # Decide lead_type first (helps to gate 'individual')
+        # B2C only if individual markers are strong AND there is no company signal
+        if individual_val > 0 and business_val == 0 and not has_contacts:
             lead_type = "B2C"
-            if category == "unknown":
-                category = "individual"
         else:
             lead_type = "B2B"
 
-        # If we have a company-style website (domain, multiple contacts), bias to B2B
-        if contacts.get("emails") or contacts.get("phones"):
-            if business_val > 0:
-                lead_type = "B2B"
+        # --- Category scores (use stricter thresholds for noisy buckets)
+        scores = {
+            "showroom": sig("showroom", min_hits=1),
+            "fit-out": sig("fitout", min_hits=2),  # require more evidence
+            "designer": sig("designer", min_hits=1),
+            "architect": sig("architect", min_hits=1),
+            "developer": sig("developer", min_hits=1),
+            # only allow individual if lead_type is B2C (gate)
+            "individual": individual_val if lead_type == "B2C" else 0.0,
+        }
+
+        top_val = max(scores.values()) if scores else 0.0
+        if top_val <= 0:
+            return ("unknown", lead_type)
+
+        # Tie-break priority:
+        # - prefer architect over fit-out when equal (engineering offices often mention finishing/turnkey)
+        # - showroom next, then designer, developer, individual
+        priority = ["architect", "fit-out", "showroom", "designer", "developer", "individual"]
+        category = next(cat for cat in priority if scores.get(cat, 0.0) == top_val)
+
+        # Consistency rule: if somehow individual selected but lead_type is B2B, fix it
+        if category == "individual" and lead_type != "B2C":
+            category = "unknown"
 
         return category, lead_type
 
     # ---------- Helpers: signals ----------
 
-    def _bucket_signal(self, norm_text: str, terms: List[str]) -> float:
-        """
-        Returns 0..1 roughly: 1 if we see enough terms; otherwise 0.
-        Keep it binary-ish for stability.
-        """
+    def _bucket_signal(self, norm_text: str, terms: List[str], min_hits: int = 2) -> float:
         hits = 0
         for t in terms:
             if t in norm_text:
                 hits += 1
-                if hits >= 2:
+                if hits >= min_hits:
                     return 1.0
-        return 0.5 if hits == 1 else 0.0
+        return 0.0
 
     def _ksa_signal(self, norm_text: str, contacts: Dict[str, List[str]], domain: str) -> float:
         # phone prefix +966 is a strong hint
@@ -361,39 +391,28 @@ class SiteEvaluator:
         return [m.group(0).lower() for m in pattern.finditer(cleaned)]
 
     def _find_phones(self, text: str) -> List[str]:
-        # Very tolerant phone matcher; then normalize a bit
-        # Matches +966 5X XXX XXXX or 05X XXX XXXX etc.
-        pattern = re.compile(r"(?:(\+?\d{1,3})[\s\-]?)?(\(?\d{2,4}\)?[\s\-]?)?(\d[\d\s\-]{6,}\d)")
-        candidates: List[str] = []
-        for m in pattern.finditer(text):
-            raw = (m.group(0) or "").strip()
-            # Skip short junk
-            digits = re.sub(r"[^\d+]", "", raw)
-            digits_only = re.sub(r"\D", "", raw)
-            if len(digits_only) < 9:
-                continue
-            candidates.append(self._normalize_phone(digits))
-        # remove empties
-        return [p for p in candidates if p]
+        # Candidate chunks that look like phone-like sequences
+        candidates = re.findall(r"(?:\+?\d[\d\s().-]{7,}\d)", text)
+        out = set()
 
-    def _normalize_phone(self, digits: str) -> str:
-        # Keep + if present, remove spaces/dashes
-        d = digits.replace(" ", "").replace("-", "")
-        # If starts with 966 without plus
-        if re.fullmatch(r"966\d{8,10}", d):
-            return "+" + d
-        # If starts with 05... assume Saudi mobile, convert to +9665...
-        if re.fullmatch(r"0?5\d{8}", re.sub(r"\D", "", d)):
-            only = re.sub(r"\D", "", d)
-            if only.startswith("0"):
-                only = only[1:]
-            return "+966" + only
-        # If already with + and enough digits
-        if d.startswith("+") and len(re.sub(r"\D", "", d)) >= 10:
-            return d
-        # fallback: digits only if long
-        only = re.sub(r"\D", "", d)
-        return ("+" + only) if len(only) >= 10 else ""
+        for raw in candidates:
+            raw = raw.strip()
+            try:
+                # If no +, assume Saudi region (SA). If +, region None.
+                num = phonenumbers.parse(raw, None if raw.startswith("+") else "SA")
+                if not phonenumbers.is_possible_number(num):
+                    continue
+                if not phonenumbers.is_valid_number(num):
+                    continue
+
+                e164 = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+                digits = re.sub(r"\D", "", e164)
+                if 10 <= len(digits) <= 15:
+                    out.add(e164)
+            except phonenumbers.NumberParseException:
+                continue
+
+        return sorted(out)
 
     def _find_whatsapp(self, text: str) -> List[str]:
         # WhatsApp links or "wa.me/..."
@@ -472,7 +491,8 @@ class SiteEvaluator:
                 # EN
                 "fit-out", "fit out", "fitout", "interior fit-out",
                 "turnkey", "turn key", "turn-key", "turnkey solutions",
-                "finishing", "interior finishing", "construction finishing",
+                "interior finishing", "construction finishing",
+                "villa finishing", "office fit-out", "commercial fit-out",
                 "renovation", "remodel", "refurbishment",
                 "contracting", "contractor", "general contractor",
                 "civil works", "gypsum", "false ceiling", "partition",
@@ -491,13 +511,13 @@ class SiteEvaluator:
 
             "portfolio": [
                 # EN
-                "portfolio", "projects", "our work", "case study", "case studies",
+                "portfolio", "projects", "case study", "case studies",
                 "gallery", "project gallery", "before and after",
                 "completed projects", "recent projects",
 
                 # AR
                 "مشاريع", "مشروع", "اعمالنا", "أعمالنا", "نماذج أعمال",
-                "معرض اعمال", "معرض أعمال", "صور", "ألبوم", "قبل وبعد",
+                "معرض اعمال", "معرض أعمال", "ألبوم", "قبل وبعد",
                 "مشاريع منفذة", "أحدث المشاريع",
             ],
 

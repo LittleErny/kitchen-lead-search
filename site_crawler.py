@@ -144,7 +144,7 @@ class SiteCrawler:
 
             page_text = self._html_to_text(res.text)
             if page_text:
-                texts.append(f"\n\n=== PAGE: {res.final_url} ===\n{page_text}")
+                texts.append(page_text)
                 out.visited_urls.append(res.final_url)
 
         out.aggregated_text = "\n".join(texts).strip()
@@ -224,8 +224,8 @@ class SiteCrawler:
         ordered_buckets = ["contact", "about", "services", "projects"]
         picked = [best[b][1] for b in ordered_buckets if b in best]
 
-        # Fallback: if nothing matched, still try common paths
-        if not picked:
+        # Fallback: only when we found no candidates at all
+        if not picked and not candidates:
             fallbacks = [
                 urljoin(base_url, "contact"),
                 urljoin(base_url, "contact-us"),
@@ -292,7 +292,7 @@ class SiteCrawler:
         lower = url.lower()
         if lower.startswith("mailto:") or lower.startswith("tel:") or lower.startswith("javascript:"):
             return ""
-        if any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".zip", ".rar", ".7z"]):
+        if any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".zip", ".rar", ".7z", ".pdf"]):
             return ""
         return url
 
