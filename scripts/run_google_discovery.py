@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from config.settings import Settings
-from clients.google_cse_client import GoogleCSEClient
+from app.settings import Settings
+from discovery.google.google_cse_client import GoogleCSEClient
 from storage.cse_cache import CSECache
 from storage.candidate_store import CandidateStore
-from sources.query_generator import QueryGenerator
-from sources.google_cse_discovery import GoogleCSEDiscovery, DiscoveryConfig
+from discovery.google.query_generator import QueryGenerator
+from discovery.google.google_cse import GoogleCSEDiscovery, DiscoveryConfig
 
 
 def main() -> None:

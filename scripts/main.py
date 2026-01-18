@@ -1,6 +1,6 @@
-from fetcher import CachedFetcher
-from site_crawler import SiteCrawler
-from site_evaluator import SiteEvaluator
+from crawling.fetcher import CachedFetcher
+from crawling.crawler import SiteCrawler
+from evaluation.evaluator import SiteEvaluator
 
 fetcher = CachedFetcher(cache_dir=".cache/http", min_delay=0.5, max_delay=1.3, max_retries=3)
 crawler = SiteCrawler(fetcher, max_pages=5)

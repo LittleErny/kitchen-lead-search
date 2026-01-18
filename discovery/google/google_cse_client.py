@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
-from config.settings import Settings
+from app.settings import Settings
 
 
 @dataclass

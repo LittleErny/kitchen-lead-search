@@ -1,4 +1,3 @@
-# run_pipeline.py
 from __future__ import annotations
 
 import argparse
@@ -7,23 +6,23 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from config.settings import Settings
+from app.settings import Settings
 
-from clients.google_cse_client import GoogleCSEClient
+from discovery.google.google_cse_client import GoogleCSEClient
 from storage.cse_cache import CSECache
 from storage.candidate_store import CandidateStore
-from sources.google_cse_discovery import DiscoveryConfig
-from sources.google_cse_discovery import GoogleCSEDiscovery
-from sources.query_generator import QueryGenerator, QuerySpec
+from discovery.google.google_cse import DiscoveryConfig
+from discovery.google.google_cse import GoogleCSEDiscovery
+from discovery.google.query_generator import QueryGenerator, QuerySpec
 
-from fetcher import CachedFetcher
-from site_crawler import SiteCrawler
-from site_evaluator import SiteEvaluator
+from crawling.fetcher import CachedFetcher
+from crawling.crawler import SiteCrawler
+from evaluation.evaluator import SiteEvaluator
 
 from storage.leads_store import LeadsStore, LeadRecord, utc_now_iso, lead_id_from_domain
 from storage.csv_export import export_leads_csv
 
-
+# Exclude obviously non-business-website domains
 BLOCKED_DOMAINS = {
     "facebook.com", "www.facebook.com",
     "instagram.com", "www.instagram.com",
@@ -79,18 +78,19 @@ def infer_country_city(text: str, evaluator: SiteEvaluator) -> Tuple[str, str]:
         if evaluator._normalize(c) in norm:
             city = c
             break
-    country = "Saudi Arabia" if ("saudi" in norm or "ksa" in norm or "السعود" in norm or city != "unknown") else "unknown"
+    country = "Saudi Arabia" if (
+                "saudi" in norm or "ksa" in norm or "السعود" in norm or city != "unknown") else "unknown"
     return country, city
 
 
 async def evaluate_one(
-    domain: str,
-    candidate: Dict[str, Any],
-    crawler: SiteCrawler,
-    evaluator: SiteEvaluator,
-    leads: LeadsStore,
-    min_score: int,
-    sem: asyncio.Semaphore,
+        domain: str,
+        candidate: Dict[str, Any],
+        crawler: SiteCrawler,
+        evaluator: SiteEvaluator,
+        leads: LeadsStore,
+        min_score: int,
+        sem: asyncio.Semaphore,
 ) -> None:
     async with sem:
         if domain in BLOCKED_DOMAINS:
@@ -141,11 +141,11 @@ async def evaluate_one(
 
 
 async def run_async_pipeline(
-    candidates: Dict[str, Any],
-    max_domains: int,
-    concurrency: int,
-    min_score: int,
-    leads_store: LeadsStore,
+        candidates: Dict[str, Any],
+        max_domains: int,
+        concurrency: int,
+        min_score: int,
+        leads_store: LeadsStore,
 ) -> None:
     # Website evaluation components
     fetcher = CachedFetcher(cache_dir=".cache/http", min_delay=0.3, max_delay=1.0)
@@ -171,7 +171,7 @@ async def run_async_pipeline(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-google", action="store_true", help="Run Google discovery before evaluation")
-    ap.add_argument("--max-queries", type=int, default=30)
+    ap.add_argument("--max-queries", type=int, default=10)
     ap.add_argument("--pages", type=int, default=1)
 
     ap.add_argument("--queries-file", type=str, default="google_queries.txt",

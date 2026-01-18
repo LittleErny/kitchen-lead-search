@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from clients.google_cse_client import GoogleCSEClient
+from discovery.google.google_cse_client import GoogleCSEClient
 from storage.cse_cache import CSECache, CacheEntry, utc_now_iso
 from storage.candidate_store import (
     CandidateHit, CandidateStore, normalize_domain, looks_like_company_site_domain
 )
-from sources.query_generator import QuerySpec
+from discovery.google.query_generator import QuerySpec
 
 
 @dataclass
@@ -27,6 +27,8 @@ class GoogleCSEDiscovery:
         self.client = client
         self.cache = cache
         self.store = store
+        self._cache_hits = 0
+        self._http_requests = 0
 
     def run(self, queries: Iterable[QuerySpec], cfg: DiscoveryConfig) -> None:
         count = 0
@@ -37,6 +39,8 @@ class GoogleCSEDiscovery:
             self._run_single_query(qs, cfg)
 
         self.store.save()
+        print(f"[Google CSE] Cache hits: {self._cache_hits}")
+        print(f"[Google CSE] HTTP requests: {self._http_requests}")
 
     def _run_single_query(self, qs: QuerySpec, cfg: DiscoveryConfig) -> None:
         for page_idx in range(cfg.pages_per_query):
@@ -55,10 +59,14 @@ class GoogleCSEDiscovery:
 
             cached = self.cache.get(request)
             if cached is not None:
+                self._cache_hits += 1
+                print(f"[Google CSE] Cache hit: q={qs.q} start={start}")
                 if cached.ok and cached.response:
                     self._consume_response(qs.q, cached.fetched_at, cached.response)
                 continue
 
+            self._http_requests += 1
+            print(f"[Google CSE] HTTP request: q={qs.q} start={start}")
             http_res = self.client.search(q=qs.q, start=start, num=cfg.num_per_page)
             entry = CacheEntry(
                 ok=http_res.ok,

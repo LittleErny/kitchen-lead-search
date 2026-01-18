@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from config.settings import Settings
+from app.settings import Settings
 from storage.cse_cache import CSECache
-from clients.google_cse_client import GoogleCSEClient
+from discovery.google.google_cse_client import GoogleCSEClient
 
 
 def main() -> None:

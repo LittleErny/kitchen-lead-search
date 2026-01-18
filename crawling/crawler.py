@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, urldefrag
 
-from fetcher import CachedFetcher, FetchResult
+from crawling.fetcher import CachedFetcher, FetchResult
 
 
 @dataclass
