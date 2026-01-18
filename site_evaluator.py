@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pprint import pprint
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import httpx
 import phonenumbers
-
+import re
+import html as html_lib
 
 # -----------------------------
 # Result model
@@ -111,7 +111,8 @@ class SiteEvaluator:
         # Normalize for matching
         norm_text = self._normalize(extracted_text)
 
-        contacts = self._extract_contacts(extracted_text, url=url)
+        contacts = self._extract_contacts(extracted_text, url=url, html=html)
+
 
         signals: Dict[str, float] = {}
         reasons: List[str] = []
@@ -367,10 +368,17 @@ class SiteEvaluator:
 
     # ---------- Helpers: contacts & text ----------
 
-    def _extract_contacts(self, text: str, url: str) -> Dict[str, List[str]]:
-        emails = sorted(set(self._find_emails(text)))
-        phones = sorted(set(self._find_phones(text)))
-        whatsapp = sorted(set(self._find_whatsapp(text)))
+    def _extract_contacts(self, text: str, url: str, html: Optional[str] = None) -> Dict[str, List[str]]:
+        emails = set(self._find_emails(text))
+        phones = set(self._find_phones(text))
+        whatsapp = set(self._find_whatsapp(text))
+
+        # NEW: also scan HTML attributes (mailto:, tel:, whatsapp links, visible obfuscations)
+        if html:
+            emails |= set(self._find_emails_in_html_attrs(html))
+            phones |= set(self._find_phones_in_html_attrs(html))
+            whatsapp |= set(self._find_whatsapp_in_html_attrs(html))
+
         websites = []
         try:
             websites = [self._domain(url)]
@@ -378,9 +386,9 @@ class SiteEvaluator:
             pass
 
         return {
-            "emails": emails,
-            "phones": phones,
-            "whatsapp": whatsapp,
+            "emails": sorted(emails),
+            "phones": sorted(phones),
+            "whatsapp": sorted(whatsapp),
             "websites": websites,
         }
 
@@ -389,6 +397,35 @@ class SiteEvaluator:
         cleaned = text.replace("(at)", "@").replace("[at]", "@").replace(" at ", "@")
         pattern = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b")
         return [m.group(0).lower() for m in pattern.finditer(cleaned)]
+
+    def _find_emails_in_html_attrs(self, html: str) -> List[str]:
+        # decode entities and percent-encoding so mailto:info%40a.com works
+        raw = html_lib.unescape(html)
+        raw = unquote(raw)
+
+        emails: set[str] = set()
+
+        # mailto:info@domain.com?subject=...
+        for m in re.finditer(r'(?i)\bmailto:\s*([^"\'\s>]+)', raw):
+            chunk = m.group(1)
+            chunk = chunk.split("?")[0]  # cut params
+            # may contain multiple separated by comma/semicolon
+            for part in re.split(r"[,\s;]+", chunk):
+                part = part.strip()
+                if not part:
+                    continue
+                # validate via existing regex
+                emails.update(self._find_emails(part))
+
+        # some sites store emails in attributes without mailto
+        # e.g. data-email="info@x.com"
+        # We'll just search emails in all attribute blobs:
+        # (cheap and effective; your email regex will filter)
+        attr_vals = re.findall(r'(?is)\b(?:href|data-email|data-mail|data-contact)\s*=\s*["\']([^"\']+)["\']', raw)
+        for v in attr_vals:
+            emails.update(self._find_emails(v))
+
+        return sorted(emails)
 
     def _find_phones(self, text: str) -> List[str]:
         # Candidate chunks that look like phone-like sequences
@@ -414,10 +451,44 @@ class SiteEvaluator:
 
         return sorted(out)
 
+    def _find_phones_in_html_attrs(self, html: str) -> List[str]:
+        raw = html_lib.unescape(html)
+        raw = unquote(raw)
+
+        phones: set[str] = set()
+
+        # tel:+966...
+        for m in re.finditer(r'(?i)\btel:\s*([^"\'\s>]+)', raw):
+            chunk = m.group(1).split("?")[0]
+            phones.update(self._find_phones(chunk))
+
+        # also scan typical attrs that contain phones
+        attr_vals = re.findall(r'(?is)\b(?:href|data-phone|data-tel|data-contact)\s*=\s*["\']([^"\']+)["\']', raw)
+        for v in attr_vals:
+            phones.update(self._find_phones(v))
+
+        return sorted(phones)
+
     def _find_whatsapp(self, text: str) -> List[str]:
         # WhatsApp links or "wa.me/..."
         pattern = re.compile(r"(https?://(?:wa\.me|api\.whatsapp\.com)/[^\s\"'<]+)", re.IGNORECASE)
         return [m.group(1) for m in pattern.finditer(text)]
+
+    def _find_whatsapp_in_html_attrs(self, html: str) -> List[str]:
+        raw = html_lib.unescape(html)
+        raw = unquote(raw)
+
+        wa: set[str] = set()
+
+        # reuse your existing extractor on the raw html
+        wa.update(self._find_whatsapp(raw))
+
+        # also try to catch common formats in href:
+        hrefs = re.findall(r'(?is)\bhref\s*=\s*["\']([^"\']+)["\']', raw)
+        for h in hrefs:
+            wa.update(self._find_whatsapp(h))
+
+        return sorted(wa)
 
     def _html_to_text(self, html: str) -> str:
         # Remove scripts/styles
@@ -648,7 +719,7 @@ if __name__ == "__main__":
     # Contact: info@alnoor.sa | +966 55 123 4567
     # Portfolio: Our Projects
     # """
-    url = "https://md4000.com/"
+    url = "https://fayunited.com.sa"
 
     ev = SiteEvaluator().evaluate_url(url=url)
     print(ev)
