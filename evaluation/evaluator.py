@@ -110,6 +110,14 @@ class SiteEvaluator:
                 self.keywords[k] = v
 
         self.negative_keywords = negative_keywords or self._default_negative_keywords()
+        self.hard_negative_terms = [
+            "bank", "banking", "loan", "credit card", "insurance",
+            "pest control", "exterminator", "termite",
+            "riyadbank", "riyadh bank",
+            "ورشة سيارات", "صيانة سيارات", "مستشفى", "عيادة",
+            "بنك", "قرض", "بطاقة", "تأمين",
+            "مكافحة حشرات", "نمل", "صراصير",
+        ]
 
         # Cities list (KSA)
         self.cities_ksa = cities_ksa or [
@@ -147,7 +155,7 @@ class SiteEvaluator:
         norm_sections = {k: self._normalize(v) for k, v in sections.items()}
 
         # Source type (page type)
-        source_type = self._classify_source_type(url, domain, norm_body, norm_sections)
+        source_type, article_guard_blocked = self._classify_source_type(url, domain, norm_body, norm_sections)
         # Geo extraction (best-effort)
         company_name = self._extract_company_name(domain, norm_sections, jsonld)
         city = self._extract_city(norm_body, norm_sections, jsonld)
@@ -220,6 +228,8 @@ class SiteEvaluator:
         # Text size normalization
         total_words = self._word_count(norm_body)
         signals["total_words"] = float(total_words)
+        empty_content = total_words <= 30 or len(norm_body.strip()) < 200
+        signals["empty_content"] = 1.0 if empty_content else 0.0
 
         # Density (anti "big site" inflation)
         # Use a floor of 300 words to avoid short pages exploding.
@@ -240,6 +250,27 @@ class SiteEvaluator:
 
         signals["individual_intent"] = float(individual_intent)
         signals["business_markers_strength"] = float(business_marker_strength)
+
+        # Override ecommerce when strong B2B/portfolio evidence exists
+        b2b_override_terms = [
+            "projects", "our projects", "case studies", "clients", "portfolio",
+            "scope of work", "services", "fit-out", "turnkey",
+        ]
+        b2b_override_hits = self._count_terms_weighted(text_map, b2b_override_terms, section_weights)
+        b2b_evidence = (
+            portfolio_signal == 1
+            or fitout_signal == 1
+            or (hp >= 6.0)
+            or (b2b_override_hits >= 1.0)
+        )
+        if source_type == "ecommerce" and b2b_evidence:
+            source_type = "company_site"
+            signals["ecommerce_overridden"] = 1.0
+        else:
+            signals["ecommerce_overridden"] = 0.0
+        signals["source_type"] = float(
+            {"company_site": 1, "ecommerce": 0.8, "marketplace": 0.5, "article": 0.2, "gov_edu": 0.0}.get(source_type, 0.3)
+        )
 
         # Page-type penalty
         page_penalty = 0
@@ -286,6 +317,14 @@ class SiteEvaluator:
             neg_terms,
             {"title": 3.0, "h1": 2.0, "h2": 1.5},
         )
+        hard_neg_title_h1 = self._count_terms_weighted(
+            {"title": norm_sections.get("title", ""), "h1": norm_sections.get("h1", "")},
+            self.hard_negative_terms,
+            {"title": 3.0, "h1": 2.0},
+        )
+        hard_neg_domain = 1.0 if self._count_terms_weighted({"d": domain}, self.hard_negative_terms, {"d": 1.0}) > 0 else 0.0
+        hard_negative_hit = (neg_title_h1 > 0.0) or (hard_neg_title_h1 > 0.0) or (hard_neg_domain > 0.0)
+
         neg_part = self.weights["negative_max"] * self._log_norm(neg + 1.5 * neg_title_h1, cap=8.0)
 
         signals["hp_count"] = float(hp)
@@ -293,17 +332,63 @@ class SiteEvaluator:
         signals["biz_count"] = float(biz)
         signals["neg_count"] = float(neg)
         signals["neg_title_h1"] = float(neg_title_h1)
+        signals["hard_negative_hit"] = 1.0 if hard_negative_hit else 0.0
+        signals["article_guard_blocked"] = 1.0 if article_guard_blocked else 0.0
 
         # --- Gate conditions (prevents random one-off mentions) ---
         # Require KSA or explicit KSA contact/domain (unless you want multi-country)
         ksa_gate = (ksa_signal >= 0.7) or domain.endswith(".sa") or any(p.startswith("+966") for p in contacts.get("phones", []))
         # Require evidence of service/business, not just one word
         content_gate = (hp >= 2.0) or (hp >= 1.0 and biz >= 2.0 and density >= 0.015)
+        # Fallback gate: kitchen/fit-out evidence even with low density
+        fallback_gate = (
+            ksa_gate
+            and (has_email == 1.0 or has_phone == 1.0)
+            and (mp >= 20.0)
+            and (
+                (hp >= 2.0)
+                or (fitout_signal == 1)
+                or (kitchen_signal == 1 and portfolio_signal == 1)
+            )
+            and (neg < 40.0)
+        )
+        if fallback_gate:
+            content_gate = True
+        if empty_content:
+            content_gate = False
 
         signals["ksa_gate"] = 1.0 if ksa_gate else 0.0
         signals["content_gate"] = 1.0 if content_gate else 0.0
+        signals["content_gate_fallback"] = 1.0 if fallback_gate else 0.0
+
+        # Cap negative penalty when strong target evidence exists (unless hard-negative evidence)
+        strong_positive = (
+            hp >= 6.0
+            or (fitout_signal == 1 and mp >= 20.0)
+            or (kitchen_signal == 1 and portfolio_signal == 1 and mp >= 20.0 and neg < 20.0)
+        )
+        if strong_positive and not hard_negative_hit:
+            neg_part = max(neg_part, -15.0)
+            signals["neg_capped"] = 1.0
+        else:
+            signals["neg_capped"] = 0.0
 
         base_score = hp_part + mp_part + biz_part + density_part + float(geo_bonus) + float(contact_bonus) + float(page_penalty) + neg_part
+
+        # Showroom bonus for kitchen-focused companies with contacts and low negatives
+        showroom_bonus = 0.0
+        if source_type in ("company_site", "ecommerce") and lead_type == "B2B":
+            bonus_category = self._categorize_business(norm_body, norm_sections, contacts, lead_type=lead_type)
+            if (
+                bonus_category == "showroom"
+                and kitchen_signal == 1
+                and (has_email == 1.0 or has_phone == 1.0)
+                and neg <= 5.0
+            ):
+                showroom_bonus = 10.0
+        if showroom_bonus:
+            base_score += showroom_bonus
+        signals["showroom_bonus"] = float(showroom_bonus)
 
         # If gates fail, cap score so they don't accidentally pass
         if not ksa_gate:
@@ -316,6 +401,9 @@ class SiteEvaluator:
 
         # Decide relevant + confidence
         relevant, confidence = self._decision(score)
+        if empty_content:
+            relevant = False
+            confidence = min(confidence, 0.35)
 
         # Categorize only when it makes sense
         category = "unknown"
@@ -406,6 +494,10 @@ class SiteEvaluator:
             r.append("KSA gate not satisfied (weak KSA evidence) -> score capped")
         if signals.get("content_gate", 0) < 1:
             r.append("Content gate not satisfied (insufficient high-precision/service evidence) -> score capped")
+        if signals.get("content_gate_fallback", 0) >= 1:
+            r.append("Content gate passed via fallback (mp/biz/contacts/KSA)")
+        if signals.get("empty_content", 0) >= 1:
+            r.append("Empty/blocked/JS-only content: insufficient text extracted")
 
         # Geo
         if signals.get("ksa_signal", 0) >= 0.7:
@@ -416,6 +508,10 @@ class SiteEvaluator:
         # Page type
         if source_type in ("gov_edu", "article", "marketplace", "ecommerce"):
             r.append(f"Page type classified as '{source_type}' -> penalty/handling applied")
+        if signals.get("article_guard_blocked", 0) >= 1:
+            r.append("Article classification blocked by homepage URL guard")
+        if signals.get("ecommerce_overridden", 0) >= 1:
+            r.append("Ecommerce classification overridden to company_site due to B2B/portfolio evidence")
 
         # Core counters
         r.append(
@@ -430,6 +526,10 @@ class SiteEvaluator:
 
         if signals.get("neg_title_h1", 0) > 0:
             r.append("Negative keywords detected in title/H1 -> stronger penalty")
+        if signals.get("neg_capped", 0) >= 1:
+            r.append("Negative penalty capped due to strong positive signals")
+        if signals.get("showroom_bonus", 0) > 0:
+            r.append("Showroom bonus applied (kitchen + contacts + low negatives)")
 
         return r
 
@@ -525,42 +625,54 @@ class SiteEvaluator:
     # Source type classification
     # -----------------------------
 
-    def _classify_source_type(self, url: str, domain: str, norm_body: str, norm_sections: Dict[str, str]) -> str:
+    def _classify_source_type(self, url: str, domain: str, norm_body: str, norm_sections: Dict[str, str]) -> Tuple[str, bool]:
         path = urlparse(url).path.lower()
+        segments = [s for s in path.split("/") if s]
+        homepage_like = path in ("", "/", "/en", "/en/", "/ar", "/ar/") or len(segments) <= 1
+        article_guard_blocked = False
+        article_patterns = ["/blog", "/news", "/post", "/article", "/insights", "/press", "/updates"]
 
         # GOV/EDU (hard non-lead in most cases)
         if domain.endswith(".gov.sa") or domain.endswith(".edu.sa"):
-            return "gov_edu"
+            return "gov_edu", article_guard_blocked
         if any(x in domain for x in ["moc.gov.sa", "momah.gov.sa", "balady.gov.sa"]) or "e-services" in norm_body:
-            return "gov_edu"
+            return "gov_edu", article_guard_blocked
 
         # Marketplace / directories
         marketplace_hosts = [
             "opensooq", "haraj", "aqar", "bayut", "linkedin", "amazon", "ikea", "tamimimarkets",
         ]
         if any(h in domain for h in marketplace_hosts):
-            return "marketplace"
+            return "marketplace", article_guard_blocked
         if any(x in path for x in ["/tags/", "/property/", "/details", "/in/"]):
-            return "marketplace"
+            return "marketplace", article_guard_blocked
 
         # Article/blog/news
-        if any(x in path for x in ["/blog", "/news", "/article", "/post", "/tips"]):
-            return "article"
+        if any(x in path for x in article_patterns):
+            if homepage_like:
+                article_guard_blocked = True
+            else:
+                return "article", article_guard_blocked
         # Heuristic: "related articles", "read more", author/date patterns
-        if ("read more" in norm_body) or ("related articles" in norm_body) or re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", norm_body):
-            # Only classify as article if service-proof is weak in title/h1
-            title_h1 = (norm_sections.get("title", "") + " " + norm_sections.get("h1", "")).strip()
-            service_terms = self.keywords.get("high_precision", []) + self.keywords.get("business_intent", [])
-            if self._count_terms_weighted({"t": title_h1}, service_terms, {"t": 1.0}) < 2.0:
-                return "article"
+        if any(x in path for x in article_patterns) and (
+            ("read more" in norm_body) or ("related articles" in norm_body) or re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", norm_body)
+        ):
+            if homepage_like:
+                article_guard_blocked = True
+            else:
+                # Only classify as article if service-proof is weak in title/h1
+                title_h1 = (norm_sections.get("title", "") + " " + norm_sections.get("h1", "")).strip()
+                service_terms = self.keywords.get("high_precision", []) + self.keywords.get("business_intent", [])
+                if self._count_terms_weighted({"t": title_h1}, service_terms, {"t": 1.0}) < 2.0:
+                    return "article", article_guard_blocked
 
         # Ecommerce
         if any(x in path for x in ["/product", "/category", "/cart", "/checkout", "/shop"]):
-            return "ecommerce"
+            return "ecommerce", article_guard_blocked
         if any(x in norm_body for x in ["add to cart", "checkout", "basket", "سلة", "الدفع"]):
-            return "ecommerce"
+            return "ecommerce", article_guard_blocked
 
-        return "company_site"
+        return "company_site", article_guard_blocked
 
     # -----------------------------
     # Contacts & parsing helpers
