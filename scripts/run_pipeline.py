@@ -51,6 +51,13 @@ def load_queries_from_file(path: str) -> Optional[List[QuerySpec]]:
         return None
     return [QuerySpec(q=ln, tag="file", city="") for ln in lines]
 
+def load_urls_from_file(path: str) -> List[str]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    return lines
 
 def pick_source(candidate: Dict[str, Any]) -> str:
     """
@@ -136,6 +143,10 @@ async def evaluate_one(
             domain=domain,
             confidence=ev.confidence,
         )
+        # print("Evaluation object:", ev)
+        # print("Reasons:", ev.reasons)
+        # print("Signals:", ev.signals)
+        # print()
 
         leads.upsert(rec)
 
@@ -187,6 +198,20 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=6,
                     help="How many sites to evaluate in parallel (threaded via asyncio.to_thread)")
 
+    ap.add_argument(
+        "--urls",
+        nargs="*",
+        default=None,
+        help="Manual URLs to evaluate (skip Google + skip candidates index). Example: --urls https://a.com https://b.com"
+    )
+    ap.add_argument(
+        "--urls-file",
+        type=str,
+        default=None,
+        help="Path to a text file with URLs (one per line). Alternative to --urls."
+    )
+
+
     args = ap.parse_args()
 
     settings = Settings.from_env(".env")
@@ -217,12 +242,56 @@ def main() -> None:
         discovery.run(qs, cfg)
         store.save()
 
-    # 2) Load candidates from index (produced by discovery)
-    candidates_path = Path(args.candidates_index)
-    if not candidates_path.exists():
-        raise SystemExit(f"Candidates index not found: {args.candidates_index}. Run with --run-google first.")
+    # 2) Load candidates
+    candidates: Dict[str, Any] = {}
 
-    candidates: Dict[str, Any] = json.loads(candidates_path.read_text(encoding="utf-8"))
+    # Manual URLs mode: skip Google discovery + skip candidates index
+    manual_urls: List[str] = []
+    if args.urls:
+        manual_urls.extend(args.urls)
+
+    if args.urls_file:
+        manual_urls.extend(load_urls_from_file(args.urls_file))
+
+    # Normalize + deduplicate while preserving order
+    if manual_urls:
+        seen = set()
+        norm_urls: List[str] = []
+        for u in manual_urls:
+            u2 = ensure_http(u)
+            if not u2:
+                continue
+            if u2 in seen:
+                continue
+            seen.add(u2)
+            norm_urls.append(u2)
+
+        # Build candidates dict compatible with evaluate_one()
+        now = utc_now_iso()
+        for i, url in enumerate(norm_urls):
+            # domain key should match how the rest of the pipeline expects it
+            # (candidate store uses domain as key)
+            domain = url.replace("https://", "").replace("http://", "").split("/")[0].lower()
+            if domain.startswith("www."):
+                domain = domain[4:]
+            candidates[domain] = {
+                "example_url": url,
+                "hits": [{"query": "manual_urls", "rank": i + 1, "url": url}],
+                "first_seen_at": now,
+            }
+
+        # Optional: override max-domains so you don't accidentally truncate the manual list
+        args.max_domains = min(args.max_domains, len(candidates))
+
+    else:
+        # Default mode: load candidates from index (produced by discovery)
+        candidates_path = Path(args.candidates_index)
+        if not candidates_path.exists():
+            raise SystemExit(
+                f"Candidates index not found: {args.candidates_index}. "
+                f"Run with --run-google first OR pass --urls / --urls-file."
+            )
+        candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
 
     # 3) Evaluate sites concurrently, store leads
     leads = LeadsStore(args.leads_index)
@@ -233,6 +302,7 @@ def main() -> None:
         min_score=args.min_score,
         leads_store=leads,
     ))
+
 
     # 4) Persist + CSV export
     leads.save()
