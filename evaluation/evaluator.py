@@ -33,7 +33,7 @@ class SiteEvaluation:
     reasons: List[str] = field(default_factory=list)         # human-readable explanations
 
     # New (allowed): enriched metadata (won't reduce existing)
-    source_type: str = "unknown"     # company_site | marketplace | article | ecommerce | gov_edu | unknown
+    source_type: str = "unknown"     # company_site | marketplace | article | ecommerce | retail_catalog | gov_edu | unknown
     company_name: str = "unknown"
     country: str = "unknown"
     city: str = "unknown"
@@ -97,8 +97,9 @@ class SiteEvaluator:
             # page-type penalties
             "penalty_gov_edu": -80,
             "penalty_article": -35,
-            "penalty_marketplace": -25,
-            "penalty_ecommerce": -8,  # mild (some ecommerce is relevant)
+            "penalty_marketplace": -35,
+            "penalty_ecommerce": -12,  # mild (some ecommerce is relevant)
+            "penalty_retail_catalog": -25,
         }
         if weights:
             self.weights.update(weights)
@@ -113,10 +114,22 @@ class SiteEvaluator:
         self.hard_negative_terms = [
             "bank", "banking", "loan", "credit card", "insurance",
             "pest control", "exterminator", "termite",
+            "water leaks", "leak detection", "leak repair", "plumbing leak",
+            "cleaning services", "house cleaning", "general cleaning",
+            "car", "cars", "auto", "automotive", "dealership", "car dealer",
+            "travel", "hotels", "flight booking", "ticketing",
+            "food delivery", "restaurant delivery",
+            "real estate listings", "property listings", "classifieds",
             "riyadbank", "riyadh bank",
             "ورشة سيارات", "صيانة سيارات", "مستشفى", "عيادة",
             "بنك", "قرض", "بطاقة", "تأمين",
             "مكافحة حشرات", "نمل", "صراصير",
+            "كشف تسرب", "تسربات المياه", "تسربات", "كشف تسريب",
+            "تنظيف", "شركة تنظيف", "مغاسل", "غسيل",
+            "سيارات", "معرض سيارات", "بيع سيارات",
+            "سفر", "حجوزات", "طيران", "تذاكر",
+            "توصيل الطعام", "طلبات الطعام",
+            "عقار", "عقارات", "إعلانات عقارية",
         ]
 
         # Cities list (KSA)
@@ -172,7 +185,14 @@ class SiteEvaluator:
         signals["ksa_signal"] = float(ksa_signal)
         signals["non_ksa"] = 1.0 if non_ksa else 0.0
         signals["source_type"] = float(
-            {"company_site": 1, "ecommerce": 0.8, "marketplace": 0.5, "article": 0.2, "gov_edu": 0.0}.get(source_type, 0.3)
+            {
+                "company_site": 1,
+                "ecommerce": 0.8,
+                "retail_catalog": 0.6,
+                "marketplace": 0.5,
+                "article": 0.2,
+                "gov_edu": 0.0,
+            }.get(source_type, 0.3)
         )
 
         # Contacts signals (small confirmation, not a reason to be relevant)
@@ -218,11 +238,13 @@ class SiteEvaluator:
         kitchen_signal = self._bucket_signal(norm_body, self.keywords.get("kitchen", []), min_hits=1)
         interior_signal = self._bucket_signal(norm_body, self.keywords.get("interior", []), min_hits=1)
         fitout_signal = self._bucket_signal(norm_body, self.keywords.get("fitout", []), min_hits=2)
+        architect_signal = self._bucket_signal(norm_body, self.keywords.get("architect", []), min_hits=1)
         portfolio_signal = self._bucket_signal(norm_body, self.keywords.get("portfolio", []), min_hits=2)
 
         signals["kitchen_signal"] = float(kitchen_signal)
         signals["interior_signal"] = float(interior_signal)
         signals["fitout_signal"] = float(fitout_signal)
+        signals["architect_signal"] = float(architect_signal)
         signals["portfolio_signal"] = float(portfolio_signal)
 
         # Text size normalization
@@ -243,6 +265,16 @@ class SiteEvaluator:
         individual_intent = self._count_terms_weighted(text_map, ind_terms, section_weights)
         business_marker_strength = self._count_terms_weighted(text_map, bus_markers, section_weights)
 
+        service_terms = [
+            "fit-out", "fit out", "fitout", "interior fit-out", "interior finishing",
+            "contracting", "contractor", "general contractor", "turnkey",
+            "engineering", "engineering consultancy", "engineering office",
+            "architect", "architectural design", "design office", "interior works",
+            "تشطيب", "مقاولات", "مقاول", "تسليم مفتاح", "فيت اوت",
+            "مكتب هندسي", "استشارات هندسية", "تصميم معماري",
+        ]
+        service_evidence = self._count_terms_weighted(text_map, service_terms, section_weights)
+
         if source_type == "marketplace" and individual_intent >= 2.0 and business_marker_strength < 2.0:
             lead_type = "B2C"
         else:
@@ -250,6 +282,7 @@ class SiteEvaluator:
 
         signals["individual_intent"] = float(individual_intent)
         signals["business_markers_strength"] = float(business_marker_strength)
+        signals["service_evidence"] = float(service_evidence)
 
         # Override ecommerce when strong B2B/portfolio evidence exists
         b2b_override_terms = [
@@ -266,10 +299,23 @@ class SiteEvaluator:
         if source_type == "ecommerce" and b2b_evidence:
             source_type = "company_site"
             signals["ecommerce_overridden"] = 1.0
+            signals["retail_catalog"] = 0.0
+        elif source_type == "ecommerce":
+            source_type = "retail_catalog"
+            signals["ecommerce_overridden"] = 0.0
+            signals["retail_catalog"] = 1.0
         else:
             signals["ecommerce_overridden"] = 0.0
+            signals["retail_catalog"] = 0.0
         signals["source_type"] = float(
-            {"company_site": 1, "ecommerce": 0.8, "marketplace": 0.5, "article": 0.2, "gov_edu": 0.0}.get(source_type, 0.3)
+            {
+                "company_site": 1,
+                "ecommerce": 0.8,
+                "retail_catalog": 0.6,
+                "marketplace": 0.5,
+                "article": 0.2,
+                "gov_edu": 0.0,
+            }.get(source_type, 0.3)
         )
 
         # Page-type penalty
@@ -282,6 +328,8 @@ class SiteEvaluator:
             page_penalty += self.weights["penalty_marketplace"]
         elif source_type == "ecommerce":
             page_penalty += self.weights["penalty_ecommerce"]
+        elif source_type == "retail_catalog":
+            page_penalty += self.weights["penalty_retail_catalog"]
 
         signals["page_penalty"] = float(page_penalty)
 
@@ -335,11 +383,43 @@ class SiteEvaluator:
         signals["hard_negative_hit"] = 1.0 if hard_negative_hit else 0.0
         signals["article_guard_blocked"] = 1.0 if article_guard_blocked else 0.0
 
+        off_vertical_terms = [
+            "water leak", "leak detection", "pest control", "cleaning services",
+            "car", "auto", "dealership", "bank", "loan", "insurance",
+            "travel", "hotel", "flight", "food delivery",
+            "real estate listings", "property listings", "classifieds",
+            "تسرب", "تسربات", "كشف تسرب", "مكافحة حشرات", "تنظيف",
+            "سيارات", "معرض سيارات", "بنك", "قرض", "تأمين",
+            "سفر", "حجز", "توصيل الطعام", "طلبات الطعام", "عقار", "إعلانات",
+        ]
+        off_vertical_score = self._count_terms_weighted(
+            {
+                "domain": domain,
+                "title": norm_sections.get("title", ""),
+                "h1": norm_sections.get("h1", ""),
+                "body": norm_body,
+            },
+            off_vertical_terms,
+            {"domain": 3.0, "title": 2.5, "h1": 2.0, "body": 1.0},
+        )
+        off_vertical_weak_target = (hp < 2.0 and fitout_signal == 0 and architect_signal == 0 and interior_signal == 0)
+        off_vertical_guard = off_vertical_score >= 2.0 and off_vertical_weak_target
+        sanity_penalty = -35.0 if off_vertical_guard else 0.0
+        signals["off_vertical_guard"] = 1.0 if off_vertical_guard else 0.0
+        signals["sanity_penalty"] = float(sanity_penalty)
+
         # --- Gate conditions (prevents random one-off mentions) ---
         # Require KSA or explicit KSA contact/domain (unless you want multi-country)
         ksa_gate = (ksa_signal >= 0.7) or domain.endswith(".sa") or any(p.startswith("+966") for p in contacts.get("phones", []))
         # Require evidence of service/business, not just one word
         content_gate = (hp >= 2.0) or (hp >= 1.0 and biz >= 2.0 and density >= 0.015)
+        # Service override: strong fit-out/contracting/engineering + KSA + contacts
+        service_gate = (
+            ksa_gate
+            and (has_email == 1.0 or has_phone == 1.0)
+            and (fitout_signal == 1 or architect_signal == 1 or interior_signal == 1 or service_evidence >= 3.0)
+            and (biz >= 2.0 or hp >= 1.0)
+        )
         # Fallback gate: kitchen/fit-out evidence even with low density
         fallback_gate = (
             ksa_gate
@@ -352,7 +432,7 @@ class SiteEvaluator:
             )
             and (neg < 40.0)
         )
-        if fallback_gate:
+        if fallback_gate or service_gate:
             content_gate = True
         if empty_content:
             content_gate = False
@@ -360,6 +440,7 @@ class SiteEvaluator:
         signals["ksa_gate"] = 1.0 if ksa_gate else 0.0
         signals["content_gate"] = 1.0 if content_gate else 0.0
         signals["content_gate_fallback"] = 1.0 if fallback_gate else 0.0
+        signals["content_gate_service"] = 1.0 if service_gate else 0.0
 
         # Cap negative penalty when strong target evidence exists (unless hard-negative evidence)
         strong_positive = (
@@ -373,7 +454,17 @@ class SiteEvaluator:
         else:
             signals["neg_capped"] = 0.0
 
-        base_score = hp_part + mp_part + biz_part + density_part + float(geo_bonus) + float(contact_bonus) + float(page_penalty) + neg_part
+        base_score = (
+            hp_part
+            + mp_part
+            + biz_part
+            + density_part
+            + float(geo_bonus)
+            + float(contact_bonus)
+            + float(page_penalty)
+            + neg_part
+            + float(sanity_penalty)
+        )
 
         # Showroom bonus for kitchen-focused companies with contacts and low negatives
         showroom_bonus = 0.0
@@ -496,6 +587,8 @@ class SiteEvaluator:
             r.append("Content gate not satisfied (insufficient high-precision/service evidence) -> score capped")
         if signals.get("content_gate_fallback", 0) >= 1:
             r.append("Content gate passed via fallback (mp/biz/contacts/KSA)")
+        if signals.get("content_gate_service", 0) >= 1:
+            r.append("Content gate passed via service override (fit-out/contracting/engineering + KSA + contacts)")
         if signals.get("empty_content", 0) >= 1:
             r.append("Empty/blocked/JS-only content: insufficient text extracted")
 
@@ -506,12 +599,14 @@ class SiteEvaluator:
             r.append("Strong non-KSA signal detected -> penalty applied")
 
         # Page type
-        if source_type in ("gov_edu", "article", "marketplace", "ecommerce"):
+        if source_type in ("gov_edu", "article", "marketplace", "ecommerce", "retail_catalog"):
             r.append(f"Page type classified as '{source_type}' -> penalty/handling applied")
         if signals.get("article_guard_blocked", 0) >= 1:
             r.append("Article classification blocked by homepage URL guard")
         if signals.get("ecommerce_overridden", 0) >= 1:
             r.append("Ecommerce classification overridden to company_site due to B2B/portfolio evidence")
+        if signals.get("off_vertical_guard", 0) >= 1:
+            r.append("Off-vertical business signals detected; applied sanity penalty (needs review)")
 
         # Core counters
         r.append(
@@ -641,10 +736,11 @@ class SiteEvaluator:
         # Marketplace / directories
         marketplace_hosts = [
             "opensooq", "haraj", "aqar", "bayut", "linkedin", "amazon", "ikea", "tamimimarkets",
+            "noon", "dubizzle", "olx",
         ]
         if any(h in domain for h in marketplace_hosts):
             return "marketplace", article_guard_blocked
-        if any(x in path for x in ["/tags/", "/property/", "/details", "/in/"]):
+        if any(x in path for x in ["/tags/", "/property/", "/details", "/listing", "/classified", "/ad/", "/in/"]):
             return "marketplace", article_guard_blocked
 
         # Article/blog/news
@@ -667,7 +763,7 @@ class SiteEvaluator:
                     return "article", article_guard_blocked
 
         # Ecommerce
-        if any(x in path for x in ["/product", "/category", "/cart", "/checkout", "/shop"]):
+        if any(x in path for x in ["/product", "/category", "/categories", "/catalog", "/cart", "/checkout", "/shop"]):
             return "ecommerce", article_guard_blocked
         if any(x in norm_body for x in ["add to cart", "checkout", "basket", "سلة", "الدفع"]):
             return "ecommerce", article_guard_blocked
@@ -1339,10 +1435,12 @@ class SiteEvaluator:
     def _default_negative_keywords(self) -> List[str]:
         return [
             # EN (irrelevant areas)
-            "car repair", "automotive", "garage", "tyres", "tire",
+            "car repair", "automotive", "garage", "tyres", "tire", "car dealership", "used cars",
             "restaurant", "cafe", "bakery", "catering",
             "hospital", "clinic", "dentist", "pharmacy",
             "hotel", "booking", "travel agency", "tourism",
+            "food delivery", "delivery app", "restaurant delivery",
+            "real estate listing", "property listing", "classifieds", "marketplace",
             "crypto", "forex", "bitcoin", "trading platform",
             "used cars", "car dealer",
             "hair salon", "barber", "spa",
@@ -1352,10 +1450,12 @@ class SiteEvaluator:
             "cement", "concrete", "steel", "rebar", "asphalt",
 
             # AR (irrelevant areas)
-            "ورشة سيارات", "صيانة سيارات", "ميكانيكا", "كهرباء سيارات", "إطارات",
+            "ورشة سيارات", "صيانة سيارات", "ميكانيكا", "كهرباء سيارات", "إطارات", "معرض سيارات",
             "مطعم", "كافيه", "مقهى", "مخبز", "تموين",
             "مستشفى", "عيادة", "طبيب أسنان", "صيدلية",
             "فندق", "حجز", "سفر", "وكالة سفر", "سياحة",
+            "توصيل الطعام", "تطبيق توصيل", "طلبات طعام",
+            "عقارات", "إعلانات عقارية", "منصة إعلانات",
             "عملات رقمية", "تداول", "فوركس", "بيتكوين", "منصة تداول",
             "سيارات مستعملة", "معرض سيارات",
             "صالون", "حلاق", "سبا",

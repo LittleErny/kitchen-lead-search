@@ -81,12 +81,6 @@ class LeadsStore:
         rec_dict["discovered_at"] = existing.get("discovered_at") or rec.discovered_at
         rec_dict["lead_id"] = existing.get("lead_id") or rec.lead_id
 
-        # Keep best score
-        if int(existing.get("relevance_score", 0)) > rec.relevance_score:
-            rec_dict["relevance_score"] = int(existing.get("relevance_score", 0))
-            rec_dict["relevant"] = bool(existing.get("relevant", False))
-            rec_dict["confidence"] = float(existing.get("confidence", 0.0))
-
         # Prefer non-empty contacts
         for k in ["email", "phone"]:
             if not rec_dict.get(k) and existing.get(k):
