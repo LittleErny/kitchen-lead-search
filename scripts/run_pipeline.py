@@ -143,10 +143,10 @@ async def evaluate_one(
             domain=domain,
             confidence=ev.confidence,
         )
-        # print("Evaluation object:", ev)
-        # print("Reasons:", ev.reasons)
-        # print("Signals:", ev.signals)
-        # print()
+        print("Evaluation object:", ev)
+        print("Reasons:", ev.reasons)
+        print("Signals:", ev.signals)
+        print()
 
         leads.upsert(rec)
 

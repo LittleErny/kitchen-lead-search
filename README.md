@@ -1,44 +1,110 @@
 # Lead Discovery Agent (MVP)
 
-A minimal pipeline that discovers candidate companies via Google Custom Search, crawls their sites, evaluates relevance, and stores leads in JSON/CSV.
+An automated pipeline that discovers, filters, and stores publicly available leads for the Saudi kitchen market. The system focuses on B2B leads (showrooms, interior studios, fit‑out contractors, developers, architects) and can be extended for B2C signals later.
 
-## Structure
+This README is intentionally focused on the **single production entrypoint**: `scripts/run_pipeline.py`. Other scripts are development helpers only.
 
-- `app/` – application settings and shared configuration
-- `discovery/` – Google CSE discovery client and query generation
-- `crawling/` – site fetching and HTML crawling
-- `evaluation/` – scoring and categorization logic
-- `storage/` – caches, stores, and CSV export
-- `scripts/` – CLI entrypoints and debug scripts
-- `data/` – output artifacts (leads index and CSV)
+## Requirements Coverage (from the technical task)
 
-## Quick Start
+Functional requirements:
+- Discover leads from public sources: **Google Search (CSE)** queries.
+- Extract and normalize lead info: contacts, category, type, score, source metadata.
+- Classify leads: B2B/B2C + category.
+- Deduplicate across runs: domain‑keyed candidate store and lead store upsert.
+- Persist leads: JSON index + CSV export.
+- Re‑runnable without duplicates: idempotent storage with stable lead IDs.
 
-1) Create `.env` with:
+Non‑functional notes:
+- Uses public data only (no logins).
+- File‑based storage (no DB required).
+- Designed for readability and extensibility.
 
-```
+## How to Run (single entrypoint)
+
+1) Create `.env` with Google CSE credentials:
+
+```bash
 GOOGLE_CSE_API_KEY=...
 GOOGLE_CSE_CX=...
 ```
 
 2) Run discovery + evaluation:
 
+```bash
+python -m scripts.run_pipeline --run-google --max-queries 10 --pages 1
 ```
-python scripts/run_pipeline.py --run-google
+
+3) Outputs:
+- JSON leads index: `data/leads/leads_index.json`
+- CSV export: `data/leads/leads.csv`
+
+### Optional: evaluate specific URLs
+
+```bash
+python -m scripts.run_pipeline --urls https://example.com https://example2.com --max-domains 2
 ```
 
-3) Exported leads:
+## Sources Used
 
-- `data/leads/leads_index.json`
-- `data/leads/leads.csv`
+- **Google Search (CSE)**: query‑driven discovery of public websites.
+- Other sources can be added under `discovery/` (e.g., directories or Maps later).
 
-## Common Scripts
+## Deduplication Logic
 
-- `python scripts/run_google_discovery.py` – run discovery only
-- `python scripts/run_pipeline.py` – full pipeline
-- `python scripts/debug_one_query.py` – debug one CSE query
+- **Discovery dedup**: candidate domains are normalized and stored once in the `CandidateStore`.
+- **Evaluation dedup**: `LeadsStore` upserts by domain‑based lead ID.
+- Re‑running the pipeline updates existing leads instead of duplicating them.
 
-## Notes
+## Data Schema
 
-- All docs and code comments are in English.
-- This is an MVP structure optimized for clarity and fast iteration.
+Each lead record includes:
+- `lead_id`
+- `lead_type` (B2B/B2C)
+- `category` (showroom/fit‑out/designer/architect/unknown)
+- `name` (currently domain; can be improved later)
+- `country`, `city`
+- `email`, `phone`, `website`
+- `source`
+- `relevance_score`, `relevant`
+- `discovered_at`
+
+## Example Output
+
+Example JSON record (shortened):
+
+```json
+{
+  "lead_id": "nadco.com.sa",
+  "lead_type": "B2B",
+  "category": "showroom",
+  "name": "nadco.com.sa",
+  "country": "Saudi Arabia",
+  "city": "riyadh",
+  "email": "info@example.com",
+  "phone": "+9665XXXXXXX",
+  "website": "nadco.com.sa",
+  "source": "google_cse|query=...|rank=...|url=...",
+  "relevance_score": 82,
+  "relevant": true,
+  "discovered_at": "2025-01-01T12:00:00Z"
+}
+```
+
+## Assumptions
+
+- MVP focuses on KSA‑targeted leads; KSA signals are required to pass gates.
+- B2B is the primary target; B2C classifieds are not prioritized.
+- Current focus is on businesses with their own websites.
+- Google CSE results are treated as public sources.
+- The current pipeline can store some non-target domains (banks, gov services, marketplaces) because filtering is heuristic and records may still be saved when they meet `min_score` even if `relevant=False`.
+- `BLOCKED_DOMAINS` only blocks exact domains and does not cover subdomains (for example, `sa.linkedin.com`).
+- Social-only businesses (LinkedIn/Facebook-only presence) are intentionally out of scope for now; they would need a separate evaluator because those platforms have different page structures.
+
+## Project Layout (high level)
+
+- `discovery/` – discovery sources (Google Search now; more later)
+- `crawling/` – fetch + crawl + aggregated text
+- `evaluation/` – scoring, classification, and reasons/signals
+- `storage/` – caches and lead persistence (JSON/CSV)
+- `scripts/` – CLI entrypoints (production uses `run_pipeline.py`)
+- `data/` – output artifacts
