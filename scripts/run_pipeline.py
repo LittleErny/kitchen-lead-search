@@ -110,10 +110,11 @@ async def evaluate_one(
         # Run sync crawler/evaluator in a thread (async MVP)
         agg = await asyncio.to_thread(crawler.collect, example_url)
         text = getattr(agg, "aggregated_text", "") or ""
-        ev = await asyncio.to_thread(evaluator.evaluate, example_url, None, text)
+        home_html = getattr(agg, "home_html", "") or ""
+        ev = await asyncio.to_thread(evaluator.evaluate, example_url, home_html, text)
 
-        if ev.relevance_score < min_score:
-            return
+        # if ev.relevance_score < min_score:
+        #     return
 
         country, city = infer_country_city(text, evaluator)
 
@@ -130,7 +131,7 @@ async def evaluate_one(
             lead_id=lead_id_from_domain(domain),
             lead_type=ev.lead_type,
             category=ev.category,
-            name=domain,  # MVP: can improve later using <title> or structured data
+            name=ev.company_name or domain,
             country=country,
             city=city,
             email=email,
@@ -143,10 +144,10 @@ async def evaluate_one(
             domain=domain,
             confidence=ev.confidence,
         )
-        print("Evaluation object:", ev)
-        print("Reasons:", ev.reasons)
-        print("Signals:", ev.signals)
-        print()
+        # print("Evaluation object:", ev)
+        # print("Reasons:", ev.reasons)
+        # print("Signals:", ev.signals)
+        # print()
 
         leads.upsert(rec)
 
@@ -314,4 +315,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # PLEASE READ README FOR INSTRUCTIONS TO RUN
     main()

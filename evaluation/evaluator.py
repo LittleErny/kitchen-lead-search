@@ -32,7 +32,6 @@ class SiteEvaluation:
     signals: Dict[str, float] = field(default_factory=dict)  # debug-friendly features
     reasons: List[str] = field(default_factory=list)         # human-readable explanations
 
-    # New (allowed): enriched metadata (won't reduce existing)
     source_type: str = "unknown"     # company_site | marketplace | article | ecommerce | retail_catalog | gov_edu | unknown
     company_name: str = "unknown"
     country: str = "unknown"
@@ -46,7 +45,7 @@ class SiteEvaluation:
 
 class SiteEvaluator:
     """
-    Rule-based site relevance evaluator (improved, size-normalized).
+    Rule-based site relevance evaluator.
 
     Interface compatibility:
       - evaluate(url, html=None, text=None) -> SiteEvaluation
@@ -55,7 +54,7 @@ class SiteEvaluator:
     """
 
     DEFAULT_THRESHOLDS = {
-        "relevant": 70,     # score >= relevant means relevant
+        "relevant": 70,     # (score >= relevant) means relevant
         "maybe_low": 45,    # between maybe_low and relevant means gray zone
     }
 
@@ -87,12 +86,12 @@ class SiteEvaluator:
             "ksa_bonus": 12,
             "non_ksa_penalty": -35,
 
-            # core scoring blocks (new)
+            # core scoring blocks
             "hp_max": 35,          # high precision max contribution
             "mp_max": 18,          # mid precision max contribution
             "biz_max": 15,         # business-intent max contribution
             "density_max": 20,     # density max contribution
-            "negative_max": -30,   # negative max penalty
+            "negative_max": -35,   # negative max penalty by keyword-spotting (bigger penalty is possible by page-types)
 
             # page-type penalties
             "penalty_gov_edu": -80,
@@ -137,7 +136,10 @@ class SiteEvaluator:
             "riyadh", "jeddah", "dammam", "khobar", "al khobar", "makkah", "mecca",
             "medina", "madinah", "taif", "tabuk", "abha", "jizan", "najran", "jubail",
             "yanbu", "hail", "buraydah", "qassim", "al ahsa", "hofuf",
-            "الرياض", "جدة", "الدمام", "الخبر", "مكة", "المدينة", "الطائف",
+            "الرياض", "جدة", "الدمام", "الخبر", "مكة", "مكة المكرمة",
+            "المدينة", "المدينة المنورة", "الطائف", "تبوك", "أبها", "جيزان",
+            "نجران", "الجبيل", "ينبع", "حائل", "بريدة", "القصيم",
+            "الأحساء", "الاحساء", "الهفوف",
         ]
 
         # Precompile regex patterns for performance & correctness
@@ -152,7 +154,7 @@ class SiteEvaluator:
 
         # Extract text
         if html:
-            body_text = self._html_to_text(html)
+            body_text = text or self._html_to_text(html)
             sections = self._extract_sections(html)
             jsonld = self._extract_jsonld(html)
         else:
@@ -192,7 +194,7 @@ class SiteEvaluator:
                 "marketplace": 0.5,
                 "article": 0.2,
                 "gov_edu": 0.0,
-            }.get(source_type, 0.3)
+            }.get(source_type, 0.3)  # 0.3 as default
         )
 
         # Contacts signals (small confirmation, not a reason to be relevant)
@@ -272,6 +274,13 @@ class SiteEvaluator:
             "architect", "architectural design", "design office", "interior works",
             "تشطيب", "مقاولات", "مقاول", "تسليم مفتاح", "فيت اوت",
             "مكتب هندسي", "استشارات هندسية", "تصميم معماري",
+            "مقاول عام", "مقاولات عامة", "مقاولات بناء", "مقاولات إنشائية",
+            "تصميم داخلي", "تصميم داخلي معماري", "ديكور", "أعمال ديكور",
+            "تشطيبات", "تشطيبات داخلية", "أعمال تشطيب", "تنفيذ داخلي",
+            "تجهيز داخلي", "اعمال داخلية", "أعمال داخلية", "أعمال معمارية",
+            "إشراف هندسي", "إدارة مشاريع", "إدارة مشروع", "إدارة تنفيذ",
+            "مكتب استشاري", "استشاري هندسي", "مكتب تصميم", "تصميم هندسي",
+            "اعمال انشائية", "أعمال إنشائية", "مقاول بناء",
         ]
         service_evidence = self._count_terms_weighted(text_map, service_terms, section_weights)
 
@@ -288,6 +297,8 @@ class SiteEvaluator:
         b2b_override_terms = [
             "projects", "our projects", "case studies", "clients", "portfolio",
             "scope of work", "services", "fit-out", "turnkey",
+            "مشاريع", "مشاريعنا", "دراسات حالة", "عملاء", "بورتفوليو",
+            "نطاق العمل", "الخدمات", "الخدمات المقدمة", "تشطيب", "تسليم مفتاح",
         ]
         b2b_override_hits = self._count_terms_weighted(text_map, b2b_override_terms, section_weights)
         b2b_evidence = (
@@ -339,7 +350,7 @@ class SiteEvaluator:
             int(has_phone) * self.weights["has_phone"] +
             int(has_whatsapp) * self.weights["has_whatsapp"]
         )
-        contact_bonus = min(contact_bonus, 10)
+        contact_bonus = min(contact_bonus, 10)  # cannot be bigger than 10
         signals["contact_bonus"] = float(contact_bonus)
 
         # Geo bonus/penalty

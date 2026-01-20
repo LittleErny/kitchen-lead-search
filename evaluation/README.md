@@ -46,8 +46,9 @@ Typical call pattern (as used in the pipeline):
 3) Evaluate the site using URL + aggregated text.
 
 Pipeline note (current code):
-- `scripts/run_pipeline.py` calls `SiteCrawler.collect(...)` and passes `aggregated_text` into `evaluate(url, text=...)`.
-- `html` is usually not provided in the pipeline path.
+- `scripts/run_pipeline.py` calls `SiteCrawler.collect(...)` and passes `aggregated_text` and the homepage HTML
+  into `evaluate(url, html=..., text=...)` so name extraction can use title/JSON-LD while scoring uses the
+  aggregated text.
 
 Conceptually:
 
@@ -99,6 +100,8 @@ Core fields:
   * **negatives (neg)**: hard/soft negatives (banking, travel, irrelevant verticals, etc.)
 * Detect **geo** signals (KSA-focused): `.sa`, “Saudi/KSA”, Arabic tokens, `+966`, known cities.
 
+Words found in the h1, h2, .. are considered as stronger evidence than those that are found in regular text in the body.
+
 ### 2) Classify `source_type` (with guards)
 
 We classify the page/site into a coarse type:
@@ -137,26 +140,35 @@ Contacts contribute to both:
 
 ### 4) Apply gates (important)
 
-Gates prevent false positives when text is weak/noisy.
+Gates prevent false positives when text is weak, noisy, or off-topic. A site can only
+be considered relevant if it passes the gates below.
 
-* **KSA gate**: requires meaningful KSA evidence for KSA-focused mode.
-* **Content gate**: requires enough strong/mid evidence to consider relevance.
-* **Fallback content gate**: can pass if there is strong kitchen/fit-out evidence
-  even when density is low.
-  Current rule (all must be true):
-  - `ksa_gate == 1`
-  - contacts present (`email` or `phone`)
-  - `mp_count >= 20`
-  - AND one of:
-    - `hp_count >= 2`, OR
-    - `fitout_signal == 1`, OR
-    - `kitchen_signal == 1` and `portfolio_signal == 1`
-  - AND `neg_count < 40`
+* **KSA gate**: must show strong KSA evidence. This passes if `ksa_signal >= 0.7`,
+  or the domain ends with `.sa`, or a phone number starts with `+966`.
+* **Content gate**: must show enough real business evidence, not just one-off mentions.
+  It passes if either:
+  - `hp_count >= 2`, or
+  - `hp_count >= 1` AND `biz_count >= 2` AND `density >= 0.015`.
+* **Service gate (override)**: if there is strong service evidence (fit-out/architecture/
+  interior/engineering), we allow the content gate to pass when:
+  - KSA gate passes, and
+  - a contact exists (email or phone), and
+  - `fitout_signal` or `architect_signal` or `interior_signal` is set, or
+    `service_evidence >= 3`, and
+  - `biz_count >= 2` or `hp_count >= 1`.
+* **Fallback gate**: allows passage even with low density when:
+  - KSA gate passes, and
+  - a contact exists (email or phone), and
+  - `mp_count >= 20`, and
+  - one of: `hp_count >= 2`, `fitout_signal == 1`, or
+    (`kitchen_signal == 1` and `portfolio_signal == 1`), and
+  - `neg_count < 40`.
 
 Empty/blocked content handling:
 
-* If content is empty/near-empty (<= 30 words or < 200 chars), set `signals["empty_content"]=1`,
-  lower confidence, force `content_gate=0`, and force non-relevant outcome.
+* If content is empty or near-empty (<= 30 words or < 200 chars), set
+  `signals["empty_content"]=1`, lower confidence, force `content_gate=0`, and
+  force a non-relevant outcome.
 
 ### 5) Score + finalize
 
@@ -176,5 +188,4 @@ Final:
 
 ## Future Classification Development Note:
 
-In future iterations, we can extend this evaluator into a **two-stage pipeline**. The current heuristic scorer should stay **fast and cheap**, primarily acting as a strong filter: it quickly accepts clearly relevant sites, rejects obvious non-target sites, and keeps a small “gray zone.” Only when the outcome is **ambiguous** (e.g., mid-range score and/or lower confidence, but with no hard-negative signals) we can escalate the site to an **LLM-based judge** with stricter instructions and richer context (aggregated text + extracted signals/contacts). This keeps costs under control while improving accuracy on borderline cases. We should **not** call an LLM for pages with **empty/blocked content** or clear hard-negative matches, since those cases are either undecidable from text or already confidently non-relevant.
-
+In future iterations, we can extend this evaluator into a **two-stage pipeline**. The current heuristic scorer should stay **fast and cheap**, primarily acting as a strong filter: it quickly accepts clearly relevant sites, rejects obvious non-target sites, and keeps a small “gray zone.” Only when the outcome is **ambiguous** (e.g., mid-range score and/or lower confidence, but with no hard-negative signals) we can escalate the site to an **LLM-based judge** with stricter instructions and richer context (aggregated text + extracted signals/contacts). This keeps costs under control while improving accuracy on borderline cases. We should **not** call an LLM for pages with **empty/blocked content** or clear hard-negative matches, since those cases are either undecidable from text or already confidently non-relevant. However, it might make sense to recheck with LLM the websites even with high relevancy >90.

@@ -16,6 +16,7 @@ class AggregatedContent:
     visited_urls: List[str] = field(default_factory=list)
     failed_urls: List[Tuple[str, str]] = field(default_factory=list)  # (url, error)
     aggregated_text: str = ""
+    home_html: str = ""
 
 
 class _LinkExtractor(HTMLParser):
@@ -110,6 +111,7 @@ class SiteCrawler:
             out.failed_urls.append((base_url, home_res.error or f"HTTP {home_res.status_code}"))
             out.aggregated_text = ""
             return out
+        out.home_html = home_res.text or ""
 
         # Decide which pages to fetch (home + buckets)
         candidates = self._extract_internal_links(home_res.final_url, home_res.text)
