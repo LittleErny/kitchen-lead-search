@@ -38,6 +38,45 @@ python -m scripts.run_pipeline --run-google --max-queries 10 --pages 1
 - JSON leads index: `data/leads/leads_index.json`
 - CSV export: `data/leads/leads.csv`
 
+## HTTP Service (n8n Runner MVP)
+
+This repo also includes a FastAPI service to run long discovery jobs asynchronously and page results.
+
+Required env:
+
+```bash
+API_TOKEN=your-secret-token
+GOOGLE_CSE_API_KEY=...
+GOOGLE_CSE_CX=...
+```
+
+Optional:
+
+```bash
+DATABASE_URL=sqlite:///./.data/lead_discovery.db
+DEBUG=false
+PORT=8000
+```
+
+Run locally:
+
+```bash
+uvicorn service.main:app --host 0.0.0.0 --port 8000
+```
+
+DigitalOcean App Platform command:
+
+```bash
+uvicorn service.main:app --host 0.0.0.0 --port $PORT
+```
+
+Endpoints:
+- `GET /health`
+- `POST /runs`
+- `GET /runs/{run_id}`
+- `GET /runs/{run_id}/results`
+- `POST /runs/{run_id}/cancel`
+
 ### Optional: evaluate specific URLs
 
 ```bash

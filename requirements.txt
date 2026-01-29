@@ -1,3 +1,5 @@
 phonenumberslite
 httpx
 phonenumbers
+fastapi
+uvicorn
