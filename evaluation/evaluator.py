@@ -24,6 +24,7 @@ class SiteEvaluation:
     relevant: bool
     relevance_score: int
     confidence: float  # 0..1 (heuristic)
+    decision: str = "reject"  # accept | review | reject
 
     # Existing fields (keep)
     lead_type: str = "unknown"   # "B2B" | "B2C" | "unknown"
@@ -36,6 +37,7 @@ class SiteEvaluation:
     company_name: str = "unknown"
     country: str = "unknown"
     city: str = "unknown"
+    empty_content: bool = False
 
 
 # -----------------------------
@@ -69,7 +71,13 @@ class SiteEvaluator:
         keywords: Optional[Dict[str, List[str]]] = None,
         negative_keywords: Optional[List[str]] = None,
         cities_ksa: Optional[List[str]] = None,
+        mode: str = "precision",
     ):
+        mode = (mode or "precision").strip().lower()
+        if mode not in ("precision", "recall"):
+            raise ValueError(f"Invalid evaluator mode: {mode}")
+        self.mode = mode
+
         # Thresholds
         self.thresholds = dict(self.DEFAULT_THRESHOLDS)
         if thresholds:
@@ -182,7 +190,7 @@ class SiteEvaluator:
 
         # KSA signal
         ksa_signal = self._ksa_signal(norm_body, contacts, domain, city_hint=city)
-        non_ksa = self._non_ksa_signal(norm_body, ksa_signal)
+        non_ksa = self._non_ksa_signal(norm_body, ksa_signal, domain=domain)
 
         signals["ksa_signal"] = float(ksa_signal)
         signals["non_ksa"] = 1.0 if non_ksa else 0.0
@@ -237,13 +245,16 @@ class SiteEvaluator:
         neg = self._count_terms_weighted(text_map, neg_terms, section_weights)
 
         # Also keep some legacy bucket signals for transparency/debug
-        kitchen_signal = self._bucket_signal(norm_body, self.keywords.get("kitchen", []), min_hits=1)
+        kitchen_terms = self.keywords.get("kitchen", [])
+        kitchen_signal = self._bucket_signal(norm_body, kitchen_terms, min_hits=1)
         interior_signal = self._bucket_signal(norm_body, self.keywords.get("interior", []), min_hits=1)
         fitout_signal = self._bucket_signal(norm_body, self.keywords.get("fitout", []), min_hits=2)
         architect_signal = self._bucket_signal(norm_body, self.keywords.get("architect", []), min_hits=1)
         portfolio_signal = self._bucket_signal(norm_body, self.keywords.get("portfolio", []), min_hits=2)
+        kitchen_hits = self._count_terms_weighted(text_map, kitchen_terms, section_weights)
 
         signals["kitchen_signal"] = float(kitchen_signal)
+        signals["kitchen_hits"] = float(kitchen_hits)
         signals["interior_signal"] = float(interior_signal)
         signals["fitout_signal"] = float(fitout_signal)
         signals["architect_signal"] = float(architect_signal)
@@ -283,6 +294,21 @@ class SiteEvaluator:
             "اعمال انشائية", "أعمال إنشائية", "مقاول بناء",
         ]
         service_evidence = self._count_terms_weighted(text_map, service_terms, section_weights)
+        developer_terms = [
+            # EN: developers / contractors / consultancies
+            "real estate developer", "property developer", "master developer",
+            "real estate development", "property development", "development company",
+            "general contractor", "construction company", "contracting company",
+            "engineering consultancy", "engineering office", "design & build", "design-build",
+            "project management", "pmo",
+            # AR
+            "مطوّر عقاري", "مطور عقاري", "تطوير عقاري", "شركة تطوير", "شركة تطوير عقاري",
+            "مقاول عام", "مقاولات عامة", "شركة مقاولات",
+            "مكتب هندسي", "استشارات هندسية",
+            "إدارة مشاريع", "ادارة مشاريع", "إدارة المشروع", "ادارة المشروع",
+            "تطوير مشاريع",
+        ]
+        developer_evidence = self._count_terms_weighted(text_map, developer_terms, section_weights)
 
         if source_type == "marketplace" and individual_intent >= 2.0 and business_marker_strength < 2.0:
             lead_type = "B2C"
@@ -292,6 +318,7 @@ class SiteEvaluator:
         signals["individual_intent"] = float(individual_intent)
         signals["business_markers_strength"] = float(business_marker_strength)
         signals["service_evidence"] = float(service_evidence)
+        signals["developer_evidence"] = float(developer_evidence)
 
         # Override ecommerce when strong B2B/portfolio evidence exists
         b2b_override_terms = [
@@ -424,12 +451,19 @@ class SiteEvaluator:
         ksa_gate = (ksa_signal >= 0.7) or domain.endswith(".sa") or any(p.startswith("+966") for p in contacts.get("phones", []))
         # Require evidence of service/business, not just one word
         content_gate = (hp >= 2.0) or (hp >= 1.0 and biz >= 2.0 and density >= 0.015)
+        # Frequency-based gate (derived from seed vs negative analysis)
+        keyword_gate = (hp >= 1.0) or (mp >= 20.0 and kitchen_hits >= 10.0)
         # Service override: strong fit-out/contracting/engineering + KSA + contacts
         service_gate = (
             ksa_gate
             and (has_email == 1.0 or has_phone == 1.0)
             and (fitout_signal == 1 or architect_signal == 1 or interior_signal == 1 or service_evidence >= 3.0)
             and (biz >= 2.0 or hp >= 1.0)
+        )
+        developer_gate = (
+            ksa_gate
+            and (developer_evidence >= 2.0)
+            and (biz >= 2.0 or mp >= 20.0)
         )
         # Fallback gate: kitchen/fit-out evidence even with low density
         fallback_gate = (
@@ -443,6 +477,10 @@ class SiteEvaluator:
             )
             and (neg < 40.0)
         )
+        if keyword_gate and ksa_gate:
+            content_gate = True
+        if developer_gate:
+            content_gate = True
         if fallback_gate or service_gate:
             content_gate = True
         if empty_content:
@@ -452,6 +490,8 @@ class SiteEvaluator:
         signals["content_gate"] = 1.0 if content_gate else 0.0
         signals["content_gate_fallback"] = 1.0 if fallback_gate else 0.0
         signals["content_gate_service"] = 1.0 if service_gate else 0.0
+        signals["content_gate_keyword"] = 1.0 if keyword_gate else 0.0
+        signals["content_gate_developer"] = 1.0 if developer_gate else 0.0
 
         # Cap negative penalty when strong target evidence exists (unless hard-negative evidence)
         strong_positive = (
@@ -503,9 +543,15 @@ class SiteEvaluator:
 
         # Decide relevant + confidence
         relevant, confidence = self._decision(score)
+        decision = "accept" if score >= self.thresholds["relevant"] else ("review" if score >= self.thresholds["maybe_low"] else "reject")
+        if empty_content:
+            decision = "review"
+        if developer_gate and decision == "reject":
+            decision = "review"
         if empty_content:
             relevant = False
             confidence = min(confidence, 0.35)
+        decision, relevant, confidence = self._binary_decision(decision, relevant, confidence)
 
         # Categorize only when it makes sense
         category = "unknown"
@@ -513,6 +559,81 @@ class SiteEvaluator:
             category = self._categorize_business(norm_body, norm_sections, contacts, lead_type=lead_type)
         elif lead_type == "B2C" and source_type == "marketplace":
             category = "individual"
+        if decision != "accept":
+            category = "unknown"
+
+        if self.mode == "recall":
+            (
+                score,
+                decision,
+                relevant,
+                confidence,
+                recall_signals,
+                recall_reasons,
+            ) = self._decision_recall(
+                domain=domain,
+                source_type=source_type,
+                ksa_signal=ksa_signal,
+                non_ksa=non_ksa,
+                contacts=contacts,
+                empty_content=empty_content,
+                kitchen_signal=kitchen_signal,
+                kitchen_hits=kitchen_hits,
+                fitout_signal=fitout_signal,
+                interior_signal=interior_signal,
+                architect_signal=architect_signal,
+                hard_negative_hit=hard_negative_hit,
+            )
+            signals.update(recall_signals)
+
+            category = "unknown"
+            if decision in ("accept", "review") and source_type in ("company_site", "ecommerce", "retail_catalog"):
+                category = self._categorize_business(norm_body, norm_sections, contacts, lead_type=lead_type)
+            elif lead_type == "B2C" and source_type == "marketplace":
+                category = "individual"
+
+            decision, relevant, confidence = self._binary_decision(decision, relevant, confidence)
+            if decision != "accept":
+                category = "unknown"
+
+            reasons = self._build_recall_reasons(
+                decision=decision,
+                source_type=source_type,
+                category=category,
+                lead_type=lead_type,
+                company_name=company_name,
+                city=city,
+                country=country,
+                contacts=contacts,
+                non_ksa=non_ksa,
+                ksa_signal=ksa_signal,
+                empty_content=empty_content,
+                hard_negative_hit=hard_negative_hit,
+                kitchen_signal=kitchen_signal,
+                fitout_signal=fitout_signal,
+                interior_signal=interior_signal,
+                architect_signal=architect_signal,
+                recall_signals=recall_signals,
+            )
+
+            return SiteEvaluation(
+                url=url,
+                domain=domain,
+                relevant=relevant,
+                relevance_score=score,
+                confidence=confidence,
+                decision=decision,
+                lead_type=lead_type,
+                category=category,
+                contacts=contacts,
+                signals=signals,
+                reasons=reasons,
+                source_type=source_type,
+                company_name=company_name,
+                city=city,
+                country=country,
+                empty_content=bool(empty_content),
+            )
 
         # Reasons
         reasons.extend(self._build_reasons(
@@ -534,6 +655,7 @@ class SiteEvaluator:
             relevant=relevant,
             relevance_score=score,
             confidence=confidence,
+            decision=decision,
             lead_type=lead_type,
             category=category,
             contacts=contacts,
@@ -543,6 +665,7 @@ class SiteEvaluator:
             company_name=company_name,
             city=city,
             country=country,
+            empty_content=bool(empty_content),
         )
 
     def evaluate_url(self, url: str, timeout: float = 15.0) -> SiteEvaluation:
@@ -562,6 +685,118 @@ class SiteEvaluator:
             conf = 0.60 + (self.thresholds["maybe_low"] - score) / 100.0
             return False, float(min(0.90, max(0.0, conf)))
         return False, 0.55
+
+    def _binary_decision(self, decision: str, relevant: bool, confidence: float) -> Tuple[str, bool, float]:
+        """
+        Collapse decision to two categories: accept or reject.
+        """
+        if decision != "accept":
+            return "reject", False, float(min(confidence, 0.60))
+        return "accept", True, confidence
+
+    def _decision_recall(
+        self,
+        domain: str,
+        source_type: str,
+        ksa_signal: float,
+        non_ksa: bool,
+        contacts: Dict[str, List[str]],
+        empty_content: bool,
+        kitchen_signal: float,
+        kitchen_hits: float,
+        fitout_signal: float,
+        interior_signal: float,
+        architect_signal: float,
+        hard_negative_hit: bool,
+    ) -> Tuple[int, str, bool, float, Dict[str, float], List[str]]:
+        """
+        Recall-first decision: reject only when strong evidence suggests a clearly irrelevant site.
+        Everything else is accept (or review if content is too thin).
+        """
+        phones = contacts.get("phones") or []
+        ksa_soft = (
+            ksa_signal >= 0.4
+            or domain.endswith(".sa")
+            or any(p.startswith("+966") for p in phones)
+        )
+        non_ksa_strong = bool(non_ksa) and not ksa_soft
+
+        clear_kitchen = (
+            kitchen_signal == 1
+            or kitchen_hits >= 1.0
+            or fitout_signal == 1
+            or interior_signal == 1
+            or architect_signal == 1
+        )
+        hard_negative_strong = bool(hard_negative_hit) and not clear_kitchen
+        source_reject = source_type in ("gov_edu", "marketplace")
+
+        recall_signals = {
+            "recall_mode": 1.0,
+            "recall_non_ksa_reject": 1.0 if non_ksa_strong else 0.0,
+            "recall_source_reject": 1.0 if source_reject else 0.0,
+            "recall_hard_negative_reject": 1.0 if hard_negative_strong else 0.0,
+            "recall_clear_kitchen": 1.0 if clear_kitchen else 0.0,
+            "recall_empty_review": 1.0 if empty_content else 0.0,
+        }
+
+        if non_ksa_strong or source_reject or hard_negative_strong:
+            return 10, "reject", False, 0.80, recall_signals, [
+                "Recall mode: rejected due to strong non-KSA or off-vertical evidence."
+            ]
+        if empty_content:
+            return 50, "review", False, 0.35, recall_signals, [
+                "Recall mode: insufficient content; keep for manual review."
+            ]
+        return 80, "accept", True, 0.60, recall_signals, [
+            "Recall mode: accepted unless clearly irrelevant."
+        ]
+
+    def _build_recall_reasons(
+        self,
+        decision: str,
+        source_type: str,
+        category: str,
+        lead_type: str,
+        company_name: str,
+        city: str,
+        country: str,
+        contacts: Dict[str, List[str]],
+        non_ksa: bool,
+        ksa_signal: float,
+        empty_content: bool,
+        hard_negative_hit: bool,
+        kitchen_signal: float,
+        fitout_signal: float,
+        interior_signal: float,
+        architect_signal: float,
+        recall_signals: Dict[str, float],
+    ) -> List[str]:
+        r: List[str] = []
+        r.append(
+            f"Recall mode: decision={decision}; source_type={source_type}; category={category}; "
+            f"lead_type={lead_type}; name={company_name}; city={city}; country={country}"
+        )
+        r.append(
+            f"Signals: ksa_signal={ksa_signal:.2f}, non_ksa={int(non_ksa)}, empty_content={int(empty_content)}, "
+            f"hard_negative_hit={int(hard_negative_hit)}, kitchen={int(kitchen_signal)}, "
+            f"fitout={int(fitout_signal)}, interior={int(interior_signal)}, architect={int(architect_signal)}"
+        )
+        if contacts.get("emails"):
+            r.append(f"Found emails: {contacts['emails'][:3]}")
+        if contacts.get("phones"):
+            r.append(f"Found phones: {contacts['phones'][:3]}")
+        if contacts.get("whatsapp"):
+            r.append("Found WhatsApp link/number")
+        if recall_signals.get("recall_non_ksa_reject", 0) >= 1:
+            r.append("Rejected: strong non-KSA evidence.")
+        if recall_signals.get("recall_source_reject", 0) >= 1:
+            r.append("Rejected: gov/edu or marketplace source type.")
+        if recall_signals.get("recall_hard_negative_reject", 0) >= 1:
+            r.append("Rejected: hard-negative terms without kitchen evidence.")
+        if recall_signals.get("recall_empty_review", 0) >= 1:
+            r.append("Review: empty/insufficient content.")
+        return r
 
     def _build_reasons(
         self,
@@ -600,6 +835,10 @@ class SiteEvaluator:
             r.append("Content gate passed via fallback (mp/biz/contacts/KSA)")
         if signals.get("content_gate_service", 0) >= 1:
             r.append("Content gate passed via service override (fit-out/contracting/engineering + KSA + contacts)")
+        if signals.get("content_gate_keyword", 0) >= 1:
+            r.append("Content gate passed via keyword frequency (hp/mp+kitchen)")
+        if signals.get("content_gate_developer", 0) >= 1:
+            r.append("Content gate passed via developer/contractor evidence")
         if signals.get("empty_content", 0) >= 1:
             r.append("Empty/blocked/JS-only content: insufficient text extracted")
 
@@ -1236,15 +1475,30 @@ class SiteEvaluator:
 
         return 0.0
 
-    def _non_ksa_signal(self, norm_text: str, ksa_signal: float) -> bool:
+    def _non_ksa_signal(self, norm_text: str, ksa_signal: float, domain: str = "") -> bool:
         # If we already have decent KSA evidence, don't penalize
         if ksa_signal >= 0.7:
             return False
 
+        if domain.endswith(".ae"):
+            return True
+
         non_ksa_terms = [
+            # GCC / neighbors
             "uae", "dubai", "abu dhabi", "qatar", "doha", "kuwait",
-            "oman", "bahrain", "egypt", "cairo", "turkey", "istanbul",
-            "uk", "london", "usa", "new york", "germany", "berlin",
+            "oman", "bahrain", "egypt", "cairo", "jordan", "amman",
+            "lebanon", "beirut", "iraq", "baghdad", "syria", "damascus",
+            "yemen", "sana'a", "sanaa", "morocco", "rabat", "tunisia",
+            "algeria", "libya", "sudan",
+            # Wider non-KSA signals
+            "turkey", "istanbul", "uk", "london", "usa", "new york", "germany", "berlin",
+            # Arabic
+            "الإمارات", "دبي", "ابوظبي", "أبوظبي",
+            "قطر", "الدوحة", "الكويت", "عمان", "البحرين",
+            "مصر", "القاهرة", "الأردن", "عمّان",
+            "لبنان", "بيروت", "العراق", "بغداد",
+            "سوريا", "دمشق", "اليمن", "صنعاء",
+            "المغرب", "الرباط", "تونس", "الجزائر", "ليبيا", "السودان",
         ]
         for t in non_ksa_terms:
             if t in norm_text:

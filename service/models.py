@@ -95,6 +95,8 @@ class LeadItem(BaseModel):
     relevance_score: int
     confidence: float
     discovered_at: str
+    empty_content: bool = False
+    decision: str = "reject"
 
 
 class ResultsResponse(BaseModel):
@@ -102,4 +104,3 @@ class ResultsResponse(BaseModel):
     items: List[LeadItem]
     next_cursor: Optional[str]
     has_more: bool
-

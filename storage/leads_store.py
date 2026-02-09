@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -42,11 +42,14 @@ class LeadRecord:
     source: str
     relevance_score: int
     relevant: bool
+    decision: str
     discovered_at: str
 
     # debug/optional
     domain: str = ""
     confidence: float = 0.0
+    empty_content: bool = False
+    signals: Dict[str, float] = field(default_factory=dict)
 
 
 class LeadsStore:

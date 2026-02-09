@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import threading
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -345,7 +346,8 @@ def _run_evaluation(
         max_delay=1.0,
     )
     crawler = SiteCrawler(fetcher=fetcher, max_pages=5)
-    evaluator = SiteEvaluator()
+    evaluator_mode = os.getenv("EVALUATOR_MODE", "precision")
+    evaluator = SiteEvaluator(mode=evaluator_mode)
 
     domains = list(candidates.keys())
     if params.limits.max_leads > 0:
@@ -387,6 +389,8 @@ def _run_evaluation(
                 "relevance_score": int(ev.relevance_score),
                 "confidence": float(ev.confidence),
                 "discovered_at": utc_now_iso(),
+                "empty_content": bool(getattr(ev, "empty_content", False) or (ev.signals or {}).get("empty_content", 0) >= 1),
+                "decision": getattr(ev, "decision", "reject"),
             }
 
             if params.dedupe.enabled:

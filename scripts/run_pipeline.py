@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -140,9 +141,12 @@ async def evaluate_one(
             source=pick_source(candidate),
             relevance_score=ev.relevance_score,
             relevant=ev.relevant,
+            decision=getattr(ev, "decision", "reject"),
             discovered_at=discovered_at,
             domain=domain,
             confidence=ev.confidence,
+            empty_content=bool(getattr(ev, "empty_content", False) or (ev.signals or {}).get("empty_content", 0) >= 1),
+            signals=ev.signals or {},
         )
         # print("Evaluation object:", ev)
         # print("Reasons:", ev.reasons)
@@ -162,7 +166,8 @@ async def run_async_pipeline(
     # Website evaluation components
     fetcher = CachedFetcher(cache_dir=".cache/http", min_delay=0.3, max_delay=1.0)
     crawler = SiteCrawler(fetcher=fetcher, max_pages=5)
-    evaluator = SiteEvaluator()
+    evaluator_mode = os.getenv("EVALUATOR_MODE", "precision")
+    evaluator = SiteEvaluator(mode=evaluator_mode)
 
     sem = asyncio.Semaphore(concurrency)
 
