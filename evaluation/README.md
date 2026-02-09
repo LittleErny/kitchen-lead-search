@@ -38,7 +38,8 @@ For each input URL/site, we attempt to infer:
 ## Input format
 
 ### Primary API
-The evaluator is used via `SiteEvaluator.evaluate(...)`.
+The evaluator is used via `SiteEvaluator.evaluate(...)` or the convenience
+method `SiteEvaluator.evaluate_url(...)`.
 
 Typical call pattern (as used in the pipeline):
 1) Crawl up to N pages on the site (default N=5).
@@ -61,6 +62,21 @@ Notes:
   **aggregated multi-page text** from the crawler.
 - If the extracted content is empty or near-empty, evaluation returns `relevant=False`
   with an explicit `empty_content` signal and reduced confidence.
+
+### Constructor and modes
+You can select a decision mode when constructing the evaluator:
+
+```python
+from evaluation.evaluator import SiteEvaluator
+
+evaluator = SiteEvaluator(mode="precision")  # or "recall"
+```
+
+The `evaluate_url(...)` helper fetches HTML directly:
+
+```python
+ev = SiteEvaluator(mode="precision").evaluate_url("https://example.com")
+```
 
 ---
 
@@ -183,6 +199,20 @@ Final:
 * `relevance_score` in 0..100
 * `relevant = (score >= threshold)` subject to gates/guards
 * `confidence` based on signal strength and data quality
+
+---
+
+## Precision vs recall modes
+
+The evaluator supports two decision modes:
+
+* `precision` (default): conservative. It rejects borderline sites and requires
+  strong KSA + service evidence to accept.
+* `recall`: permissive. It accepts unless there is strong evidence of non‑KSA,
+  off‑vertical, or marketplace/gov/edu content. Thin/empty pages are kept for review.
+
+Mode changes **only the decision logic**, not the extraction steps. The same
+signals are computed in both modes.
 
 ---
 

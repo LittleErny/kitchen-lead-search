@@ -41,6 +41,7 @@ class GeoModel(BaseModel):
 class RunCreateRequest(BaseModel):
     run_name: Optional[str] = None
     mode: str = "refresh"
+    evaluator_mode: Optional[str] = None
     sources: List[str] = Field(default_factory=lambda: ["google"])
     queries: List[str] = Field(default_factory=list)
     geo: GeoModel = Field(default_factory=GeoModel)
@@ -48,6 +49,17 @@ class RunCreateRequest(BaseModel):
     dedupe: DedupeModel = Field(default_factory=DedupeModel)
     output: OutputModel = Field(default_factory=OutputModel)
     callback_url: Optional[str] = None
+
+    @validator("evaluator_mode")
+    def normalize_evaluator_mode(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        mode = str(v).strip().lower()
+        if not mode:
+            return None
+        if mode not in ("precision", "recall"):
+            raise ValueError("evaluator_mode must be 'precision' or 'recall'")
+        return mode
 
 
 class RunCreateResponse(BaseModel):

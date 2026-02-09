@@ -346,7 +346,7 @@ def _run_evaluation(
         max_delay=1.0,
     )
     crawler = SiteCrawler(fetcher=fetcher, max_pages=5)
-    evaluator_mode = os.getenv("EVALUATOR_MODE", "precision")
+    evaluator_mode = params.evaluator_mode or os.getenv("EVALUATOR_MODE", "precision")
     evaluator = SiteEvaluator(mode=evaluator_mode)
 
     domains = list(candidates.keys())

@@ -56,6 +56,7 @@ Optional:
 DATABASE_URL=sqlite:///./.data/lead_discovery.db
 DEBUG=false
 PORT=8000
+EVALUATOR_MODE=precision
 ```
 
 Run locally:
@@ -77,10 +78,30 @@ Endpoints:
 - `GET /runs/{run_id}/results`
 - `POST /runs/{run_id}/cancel`
 
+`POST /runs` supports an evaluator mode override in the request body:
+
+```json
+{
+  "sources": ["google"],
+  "queries": ["kitchen showroom riyadh", "modular kitchen jeddah"],
+  "evaluator_mode": "recall"
+}
+```
+
+Notes:
+- `evaluator_mode` accepts `precision` or `recall`.
+- If omitted, the service falls back to `EVALUATOR_MODE`, then defaults to `precision`.
+
 ### Optional: evaluate specific URLs
 
 ```bash
 python -m scripts.run_pipeline --urls https://example.com https://example2.com --max-domains 2
+```
+
+Or from a file:
+
+```bash
+python -m scripts.run_pipeline --urls-file urls.txt --max-domains 50
 ```
 
 ## Sources Used

@@ -17,8 +17,8 @@ the evaluator is only mentioned briefly.
 ## 3) Store candidate hits on disk (JSON)
 - Code: `storage/candidate_store.py`
 - We persist candidates as:
-  - `data/candidates/candidates.jsonl` (append-only)
-  - `data/candidates/candidates_index.json` (compact index)
+  - `.cache/google_cse/candidates.jsonl` (append-only)
+  - `.cache/google_cse/candidates_index.json` (compact index)
 - Each candidate stores `domain`, `example_url`, and `hits[]`
   (query, rank, url, title, snippet).
 
@@ -60,4 +60,3 @@ the evaluator is only mentioned briefly.
 - The final record is saved with fields like:
   `name`, `domain`, `website`, `email`, `phone`, `score`, `relevant`, `confidence`.
 - Outputs are stored in `data/leads/` (CSV + JSON index).
-
