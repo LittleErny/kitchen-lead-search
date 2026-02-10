@@ -25,7 +25,7 @@ logger = logging.getLogger("lead_discovery_runner")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-SERVICE_VERSION = "0.1.0"
+SERVICE_VERSION = "0.1.1"
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "1048576"))  # 1MB default
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 
