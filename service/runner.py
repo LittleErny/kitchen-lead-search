@@ -28,6 +28,9 @@ logger = logging.getLogger("lead_discovery_runner")
 
 
 _cancel_events: Dict[str, threading.Event] = {}
+_started_runs_guard = threading.Lock()
+_started_runs: set[str] = set()
+_create_run_guard = threading.Lock()
 
 
 def _ensure_cancel_event(run_id: str) -> threading.Event:
@@ -138,69 +141,91 @@ def _hash_payload(payload: Dict[str, Any]) -> str:
 
 
 def create_run(params: RunCreateRequest, idempotency_key: Optional[str]) -> Dict[str, Any]:
-    now = utc_now_iso()
-    payload = params.dict()
-    payload_hash = _hash_payload(payload)
+    # Serialize create path to avoid race where two identical POST /runs
+    # can create different run_ids before either row becomes visible.
+    with _create_run_guard:
+        now = utc_now_iso()
+        payload = params.dict()
+        payload_hash = _hash_payload(payload)
 
-    if idempotency_key:
-        row = db.fetch_one(
-            "SELECT run_id FROM idempotency WHERE idem_key = ? AND payload_hash = ?",
-            (idempotency_key, payload_hash),
+        # Guard even without Idempotency-Key:
+        # if the exact same payload is already queued/running, reuse that run.
+        # This prevents duplicate concurrent jobs from external retriers/workflows.
+        active_same_payload = db.fetch_one(
+            """
+            SELECT run_id
+            FROM runs
+            WHERE payload_hash = ?
+              AND status IN ('queued', 'running')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (payload_hash,),
         )
-        if row:
-            run_id = row["run_id"]
+        if active_same_payload:
+            run_id = active_same_payload["run_id"]
             run_row = db.fetch_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
             return dict(run_row) if run_row else {"run_id": run_id}
 
-    run_id = _new_run_id()
-    progress = {
-        "stage": "queued",
-        "percent": 0.0,
-        "message": "Queued",
-        "started_at": None,
-        "updated_at": now,
-    }
-    metrics = {
-        "requests_made": 0,
-        "leads_found_total": 0,
-        "leads_new": 0,
-        "leads_duplicates": 0,
-        "errors": 0,
-    }
-    db.execute(
-        """
-        INSERT INTO runs (
-            run_id, status, created_at, started_at, updated_at,
-            params_json, progress_json, metrics_json, error_json,
-            idempotency_key, payload_hash, cancel_requested
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            run_id,
-            "queued",
-            now,
-            None,
-            now,
-            json.dumps(payload, ensure_ascii=False),
-            json.dumps(progress, ensure_ascii=False),
-            json.dumps(metrics, ensure_ascii=False),
-            None,
-            idempotency_key,
-            payload_hash,
-            0,
-        ),
-    )
-    if idempotency_key:
+        if idempotency_key:
+            row = db.fetch_one(
+                "SELECT run_id FROM idempotency WHERE idem_key = ? AND payload_hash = ?",
+                (idempotency_key, payload_hash),
+            )
+            if row:
+                run_id = row["run_id"]
+                run_row = db.fetch_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+                return dict(run_row) if run_row else {"run_id": run_id}
+
+        run_id = _new_run_id()
+        progress = {
+            "stage": "queued",
+            "percent": 0.0,
+            "message": "Queued",
+            "started_at": None,
+            "updated_at": now,
+        }
+        metrics = {
+            "requests_made": 0,
+            "leads_found_total": 0,
+            "leads_new": 0,
+            "leads_duplicates": 0,
+            "errors": 0,
+        }
         db.execute(
             """
-            INSERT OR IGNORE INTO idempotency (idem_key, payload_hash, run_id, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO runs (
+                run_id, status, created_at, started_at, updated_at,
+                params_json, progress_json, metrics_json, error_json,
+                idempotency_key, payload_hash, cancel_requested
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (idempotency_key, payload_hash, run_id, now),
+            (
+                run_id,
+                "queued",
+                now,
+                None,
+                now,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(progress, ensure_ascii=False),
+                json.dumps(metrics, ensure_ascii=False),
+                None,
+                idempotency_key,
+                payload_hash,
+                0,
+            ),
         )
-    run_row = db.fetch_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
-    return dict(run_row) if run_row else {"run_id": run_id, "status": "queued", "created_at": now}
+        if idempotency_key:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO idempotency (idem_key, payload_hash, run_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (idempotency_key, payload_hash, run_id, now),
+            )
+        run_row = db.fetch_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+        return dict(run_row) if run_row else {"run_id": run_id, "status": "queued", "created_at": now}
 
 
 def _new_run_id() -> str:
@@ -210,44 +235,53 @@ def _new_run_id() -> str:
 
 
 def start_run_thread(run_id: str) -> None:
+    with _started_runs_guard:
+        if run_id in _started_runs:
+            return
+        _started_runs.add(run_id)
+
     t = threading.Thread(target=_run_job, args=(run_id,), daemon=True)
     t.start()
 
 
 def _run_job(run_id: str) -> None:
-    row = db.fetch_one("SELECT params_json FROM runs WHERE run_id = ?", (run_id,))
-    if not row:
-        return
-    params = RunCreateRequest.parse_obj(json.loads(row["params_json"]))
-    cancel_event = _ensure_cancel_event(run_id)
-
-    progress = {
-        "stage": "running",
-        "percent": 0.0,
-        "message": "Starting",
-        "started_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-    }
-    _update_run(run_id, status="running", progress=progress)
-
     try:
-        _execute_run(run_id, params, cancel_event)
-        if _is_cancel_requested(run_id):
-            progress.update(
-                {"stage": "cancelled", "percent": 100.0, "message": "Cancelled", "updated_at": utc_now_iso()}
-            )
-            _update_run(run_id, status="cancelled", progress=progress)
-        else:
-            progress.update(
-                {"stage": "done", "percent": 100.0, "message": "Finished", "updated_at": utc_now_iso()}
-            )
-            _update_run(run_id, status="finished", progress=progress)
-    except Exception as exc:
-        trace_id = f"err-{run_id[:8]}"
-        logger.exception("Run failed: run_id=%s trace_id=%s", run_id, trace_id)
-        error = {"type": type(exc).__name__, "message": str(exc), "trace_id": trace_id}
-        progress.update({"stage": "failed", "message": "Failed", "updated_at": utc_now_iso()})
-        _update_run(run_id, status="failed", progress=progress, error=error)
+        row = db.fetch_one("SELECT params_json FROM runs WHERE run_id = ?", (run_id,))
+        if not row:
+            return
+        params = RunCreateRequest.parse_obj(json.loads(row["params_json"]))
+        cancel_event = _ensure_cancel_event(run_id)
+
+        progress = {
+            "stage": "running",
+            "percent": 0.0,
+            "message": "Starting",
+            "started_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+        }
+        _update_run(run_id, status="running", progress=progress)
+
+        try:
+            _execute_run(run_id, params, cancel_event)
+            if _is_cancel_requested(run_id):
+                progress.update(
+                    {"stage": "cancelled", "percent": 100.0, "message": "Cancelled", "updated_at": utc_now_iso()}
+                )
+                _update_run(run_id, status="cancelled", progress=progress)
+            else:
+                progress.update(
+                    {"stage": "done", "percent": 100.0, "message": "Finished", "updated_at": utc_now_iso()}
+                )
+                _update_run(run_id, status="finished", progress=progress)
+        except Exception as exc:
+            trace_id = f"err-{run_id[:8]}"
+            logger.exception("Run failed: run_id=%s trace_id=%s", run_id, trace_id)
+            error = {"type": type(exc).__name__, "message": str(exc), "trace_id": trace_id}
+            progress.update({"stage": "failed", "message": "Failed", "updated_at": utc_now_iso()})
+            _update_run(run_id, status="failed", progress=progress, error=error)
+    finally:
+        with _started_runs_guard:
+            _started_runs.discard(run_id)
 
 
 def _execute_run(run_id: str, params: RunCreateRequest, cancel_event: threading.Event) -> None:

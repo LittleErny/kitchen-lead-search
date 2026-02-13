@@ -61,7 +61,8 @@ class GoogleCSEClient:
 
         headers = {"User-Agent": self.settings.user_agent}
 
-        # Retry with exponential backoff for 429/5xx
+        # Retry with exponential backoff for transient 429/5xx.
+        # Daily quota exhaustion is treated as non-retryable.
         last_err = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -70,7 +71,10 @@ class GoogleCSEClient:
                 if r.status_code == 200:
                     return GoogleCSEHttpResult(ok=True, status_code=200, data=r.json())
                 if r.status_code in (429, 500, 502, 503, 504):
-                    last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                    body = r.text[:1000]
+                    last_err = f"HTTP {r.status_code}: {body[:200]}"
+                    if r.status_code == 429 and self.is_quota_exhausted_error(body):
+                        return GoogleCSEHttpResult(ok=False, status_code=429, error=last_err)
                     self._sleep_backoff(attempt)
                     continue
                 return GoogleCSEHttpResult(ok=False, status_code=r.status_code, error=r.text[:500])
@@ -86,3 +90,37 @@ class GoogleCSEClient:
         base = 0.6 * (2 ** attempt)
         jitter = random.uniform(0.0, 0.4)
         time.sleep(min(10.0, base + jitter))
+
+    @staticmethod
+    def is_quota_exhausted_error(error_text: Optional[str], data: Optional[Dict[str, Any]] = None) -> bool:
+        txt = (error_text or "").lower()
+
+        # Try structured Google API error fields first when present.
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                status = str(err.get("status", "")).lower()
+                message = str(err.get("message", "")).lower()
+                if "resource_exhausted" in status:
+                    return True
+                if "quota" in message or "daily" in message or "limit" in message:
+                    return True
+                details = err.get("details")
+                if isinstance(details, list):
+                    for d in details:
+                        if isinstance(d, dict):
+                            reason = str(d.get("reason", "")).lower()
+                            if "quota" in reason or "limit" in reason:
+                                return True
+
+        if not txt:
+            return False
+        markers = (
+            "resource_exhausted",
+            "quota",
+            "daily limit",
+            "rate limit exceeded",
+            "quota exceeded",
+            "billing",
+        )
+        return any(m in txt for m in markers)

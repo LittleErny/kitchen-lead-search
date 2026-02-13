@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,21 @@ from storage.candidate_store import (
     CandidateHit, CandidateStore, normalize_domain, looks_like_company_site_domain
 )
 from discovery.google.query_generator import QuerySpec
+
+
+_REQUEST_LOCKS_GUARD = threading.Lock()
+_REQUEST_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _request_lock_for(key: str) -> threading.Lock:
+    # Single-flight lock by cache key to prevent duplicate concurrent HTTP calls
+    # for the same Google request when multiple runs execute in parallel.
+    with _REQUEST_LOCKS_GUARD:
+        lock = _REQUEST_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REQUEST_LOCKS[key] = lock
+        return lock
 
 
 @dataclass
@@ -29,6 +45,7 @@ class GoogleCSEDiscovery:
         self.store = store
         self._cache_hits = 0
         self._http_requests = 0
+        self._quota_exhausted = False
 
     def run(self, queries: Iterable[QuerySpec], cfg: DiscoveryConfig) -> None:
         count = 0
@@ -57,30 +74,43 @@ class GoogleCSEDiscovery:
                 "safe": self.client.settings.safe,
             }
 
-            cached = self.cache.get(request)
-            if cached is not None:
-                self._cache_hits += 1
-                print(f"[Google CSE] Cache hit: q={qs.q} start={start}")
-                if cached.ok and cached.response:
-                    self._consume_response(qs.q, cached.fetched_at, cached.response)
-                continue
+            key = self.cache._key_for(request)
+            lock = _request_lock_for(key)
 
-            self._http_requests += 1
-            print(f"[Google CSE] HTTP request: q={qs.q} start={start}")
-            http_res = self.client.search(q=qs.q, start=start, num=cfg.num_per_page)
-            entry = CacheEntry(
-                ok=http_res.ok,
-                status_code=http_res.status_code,
-                fetched_at=utc_now_iso(),
-                request=request,
-                response=http_res.data,
-                error=http_res.error,
-                from_cache=False,
-            )
-            self.cache.set(entry)
+            with lock:
+                cached = self.cache.get(request)
+                if cached is not None:
+                    self._cache_hits += 1
+                    print(f"[Google CSE] Cache hit: q={qs.q} start={start}")
+                    if cached.ok and cached.response:
+                        self._consume_response(qs.q, cached.fetched_at, cached.response)
+                    continue
 
-            if http_res.ok and http_res.data:
-                self._consume_response(qs.q, entry.fetched_at, http_res.data)
+                # When daily quota is exhausted we can still serve cache hits,
+                # but we should skip any new HTTP misses in the same process run.
+                if self._quota_exhausted:
+                    print(f"[Google CSE] Skip HTTP (quota exhausted): q={qs.q} start={start}")
+                    continue
+
+                self._http_requests += 1
+                print(f"[Google CSE] HTTP request: q={qs.q} start={start}")
+                http_res = self.client.search(q=qs.q, start=start, num=cfg.num_per_page)
+                entry = CacheEntry(
+                    ok=http_res.ok,
+                    status_code=http_res.status_code,
+                    fetched_at=utc_now_iso(),
+                    request=request,
+                    response=http_res.data,
+                    error=http_res.error,
+                    from_cache=False,
+                )
+                self.cache.set(entry)
+
+                if http_res.status_code == 429 and self.client.is_quota_exhausted_error(http_res.error, http_res.data):
+                    self._quota_exhausted = True
+
+                if http_res.ok and http_res.data:
+                    self._consume_response(qs.q, entry.fetched_at, http_res.data)
 
     def _consume_response(self, query: str, fetched_at: str, data: Dict[str, Any]) -> None:
         items = data.get("items") or []
