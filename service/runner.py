@@ -327,6 +327,10 @@ def _run_google_discovery(
     params: RunCreateRequest,
     metrics: Dict[str, Any],
 ) -> Dict[str, Any]:
+    # Explicitly honor max_pages=0: perform no Google discovery requests.
+    if params.limits.max_pages <= 0:
+        return {}
+
     settings = Settings.from_env(".env")
     cache_dir = Path(".cache/google_cse")
     run_dir = Path(".cache/google_cse") / "runs" / run_id
@@ -335,7 +339,7 @@ def _run_google_discovery(
     client = GoogleCSEClient(settings=settings, timeout=params.limits.request_timeout_s)
     discovery = GoogleCSEDiscovery(client=client, cache=cache, store=store)
     cfg = DiscoveryConfig(
-        pages_per_query=params.limits.max_pages if params.limits.max_pages > 0 else 1,
+        pages_per_query=params.limits.max_pages,
         num_per_page=10,
         max_queries=len(queries),
     )
